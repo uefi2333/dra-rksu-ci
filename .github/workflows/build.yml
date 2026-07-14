@@ -32,7 +32,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
             bc bison flex libssl-dev make libc6-dev libncurses5-dev \
-            gcc-aarch64-linux-gnu python3 git wget zip
+            gcc-aarch64-linux-gnu python3 git wget zip python2
 
       - name: Clone kernel source
         run: |
@@ -40,9 +40,6 @@ jobs:
           cd kernel
           echo "Kernel version: $(head -5 Makefile | grep -E 'VERSION|PATCHLEVEL|SUBLEVEL' | tr '\n' ' ')"
 
-      - name: Fix DrvGen.py Python 2->3 compatibility
-        run: |
-          python3 fix_drvgen.py kernel/tools/dct/DrvGen.py
 
       - name: Download GCC 4.9 toolchain
         run: |
@@ -94,7 +91,7 @@ jobs:
           export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
 
           # Generate base config
-          make O=out $DEFCONFIG
+          make O=out python=python2 $DEFCONFIG
 
           # Merge board config
           if [ -f "arch/arm64/configs/$BOARD_DEFCONFIG" ]; then
@@ -119,7 +116,7 @@ jobs:
             --disable HW_ROOT_SCAN \
             --enable OVERLAY_FS
 
-          make O=out ARCH=arm64 olddefconfig
+          make O=out ARCH=arm64 python=python2 olddefconfig
 
           echo "=== Config check ==="
           for cfg in KSU KSU_MANUAL_HOOK KPROBES KALLSYMS_ALL NAMESPACES HW_ROOT_SCAN OVERLAY_FS; do
@@ -136,6 +133,7 @@ jobs:
 
           make O=out \
             ARCH=arm64 \
+            python=python2 \
             CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-" \
             HOSTCFLAGS="-fcommon -Wno-error" \
             -j$(nproc) 2>&1 | tail -100
