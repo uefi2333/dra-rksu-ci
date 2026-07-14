@@ -16,7 +16,7 @@ jobs:
 
     env:
       KERNEL_REPO: https://github.com/paperluigis/android-huawei-dura-kernel
-      KERNEL_BRANCH: og
+      KERNEL_BRANCH: master
       DEFCONFIG: dura64_defconfig
       BOARD_DEFCONFIG: dura64_board_AL00A_defconfig
       ARCH: arm64
@@ -43,7 +43,7 @@ jobs:
       - name: Download GCC 4.9 toolchain
         run: |
           # LineageOS GCC 4.9 aarch64
-          git clone --depth=1 https://github.com/nickyzhang/prebuilts_gcc-linux-x86_aarch64-aarch64-linux-android-4.9 gcc49
+          git clone --depth=1 https://github.com/rockchip-android/prebuilts-gcc-linux-x86-aarch64-aarch64-linux-android-4.9 gcc49
           export PATH="$GITHUB_WORKSPACE/gcc49/bin:$PATH"
           aarch64-linux-android-gcc --version | head -1
 
