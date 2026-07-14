@@ -162,9 +162,7 @@ jobs:
             --disable HW_ROOT_SCAN \
             --enable OVERLAY_FS || true
 
-          # stock camera list (DRA-AL00A has extra sensors vs board fragment)
-          scripts/config --file out/.config \
-            --set-str CUSTOM_KERNEL_IMGSENSOR "hi1333_mipi_raw s5k3l6_mipi_raw s5k3l6mam_mipi_raw ov13855_mipi_raw hi846_mipi_raw ov8856_mipi_raw gc8034_mipi_raw gc8034a_mipi_raw hi556_mipi_raw gc5025a_mipi_raw gc5025h_mipi_raw gc5025aw_mipi_raw ov5675_mipi_raw s5k5e9yx_mipi_raw" || true
+          # keep board/defconfig imgsensor list (stock string has missing dirs e.g. gc5025aw)
 
           make O=out ARCH=arm64 python=python2 olddefconfig
 
@@ -222,7 +220,7 @@ jobs:
           echo "=== Config check (final, no olddefconfig after) ==="
           for cfg in KSU KSU_MANUAL_HOOK KALLSYMS_ALL HZ HZ_300 FINAL_RELEASE \
                      CMA_DEBUG MMC_FFU MTK_BLOCK_TAG HUAWEI_VIRT_TO_PHYS HUAWEI_TS_KIT_TEST \
-                     CUSTOM_KERNEL_IMGSENSOR WLAN USB_GADGET MTK_SMART_BATTERY; do
+                     WLAN USB_GADGET MTK_SMART_BATTERY; do
             grep "CONFIG_${cfg}" out/.config || echo "CONFIG_${cfg} not found"
           done
 
