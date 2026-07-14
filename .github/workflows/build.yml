@@ -7,199 +7,180 @@ on:
         description: 'RKSU tag/branch (e.g. v1.0.5-83-legacy)'
         required: false
         default: 'v1.0.5-83-legacy'
+      build_mode:
+        description: 'rksu | baseline (no RKSU, for boot bisect)'
+        required: false
+        default: 'rksu'
+
+permissions:
+  contents: write
+
+env:
+  KERNEL_REPO: https://github.com/paperluigis/android-huawei-dura-kernel
+  KERNEL_BRANCH: og
+  DEFCONFIG: dura64_defconfig
+  BOARD_DEFCONFIG: dura64_board_AL00A_defconfig
+  ARCH: arm64
+  RKSU_REPO: https://github.com/rsuntk/KernelSU
+  RKSU_TAG: ${{ github.event.inputs.rksu_tag || 'v1.0.5-83-legacy' }}
+  BUILD_MODE: ${{ github.event.inputs.build_mode || 'rksu' }}
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    permissions:
-      contents: write
-
-    env:
-      KERNEL_REPO: https://github.com/paperluigis/android-huawei-dura-kernel
-      KERNEL_BRANCH: og
-      DEFCONFIG: dura64_defconfig
-      BOARD_DEFCONFIG: dura64_board_AL00A_defconfig
-      ARCH: arm64
-      RKSU_REPO: https://github.com/rsuntk/KernelSU
-      RKSU_TAG: ${{ github.event.inputs.rksu_tag || 'v1.0.5-83-legacy' }}
-
     steps:
       - name: Checkout CI repo
         uses: actions/checkout@v4
 
       - name: Install dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get update
+          sudo apt-get install -y git curl wget tar xz-utils python2 python3 \
             bc bison flex libssl-dev make libc6-dev libncurses5-dev \
-            gcc-aarch64-linux-gnu python3 git wget zip python2
+            zip unzip gcc g++ ccache device-tree-compiler
 
       - name: Clone kernel source
         run: |
-          git clone --depth=1 -b $KERNEL_BRANCH $KERNEL_REPO kernel
-          cd kernel
-          echo "Kernel version: $(head -5 Makefile | grep -E 'VERSION|PATCHLEVEL|SUBLEVEL' | tr '\n' ' ')"
-
+          git clone --depth=1 -b "$KERNEL_BRANCH" "$KERNEL_REPO" kernel
+          echo "[+] kernel @ $KERNEL_BRANCH"
 
       - name: Download GCC 4.9 toolchain
         run: |
-          # LineageOS GCC 4.9 aarch64
-          git clone --depth=1 https://github.com/KudProject/aarch64-linux-android-4.9 gcc49
-          export PATH="$GITHUB_WORKSPACE/gcc49/bin:$PATH"
-          aarch64-linux-android-gcc --version | head -1
+          # Keep same aarch64-linux-android-4.9 path used by successful compile
+          git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 gcc49 \
+            || git clone --depth=1 https://github.com/rockchip-linux/prebuilts-gcc-linux-x86-aarch64-linux-android-4.9 gcc49
+          ls gcc49/bin | head
 
       - name: Integrate RKSU
+        if: env.BUILD_MODE == 'rksu'
         run: |
-          cd kernel
-          # Clone RKSU
           git clone --depth=1 -b main $RKSU_REPO KernelSU
           cd KernelSU && git fetch --tags && git checkout $RKSU_TAG && cd ..
-
-          # Symlink into drivers/
-          ln -sf "$(realpath KernelSU/kernel)" drivers/kernelsu
-
-          # Patch drivers/Makefile
-          echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
-
-          # Patch drivers/Kconfig
-          sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
-
+          ln -sf "$(realpath KernelSU/kernel)" kernel/drivers/kernelsu
+          echo 'obj-$(CONFIG_KSU) += kernelsu/' >> kernel/drivers/Makefile
+          sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' kernel/drivers/Kconfig
           echo "[+] RKSU integrated at $RKSU_TAG"
 
       - name: Apply manual hooks patch
-        run: |
-          cd kernel
-          bash "$GITHUB_WORKSPACE/patch_dra_hooks.sh"
+        if: env.BUILD_MODE == 'rksu'
+        working-directory: kernel
+        run: bash "$GITHUB_WORKSPACE/patch_dra_hooks.sh"
 
       - name: Suppress C90 declaration-after-statement error in kernel Makefile
+        working-directory: kernel
         run: |
-          cd kernel
-          # real flag is -Wdeclaration-after-statement (Makefile ~L790)
-          sed -i 's/-Wdeclaration-after-statement/-Wno-declaration-after-statement/g' Makefile
-          grep -n "declaration-after-statement" Makefile || true
-          echo "[+] Disabled -Wdeclaration-after-statement"
-
-      - name: Fix host tool compatibility (GCC 11 vs 4.4 kernel)
-        run: |
-          cd kernel
-
-          # Fix dtc yylloc multiple definition (GCC 10+ -fno-common)
-          if grep -rq 'YYLTYPE yylloc' scripts/dtc/dtc-lexer.l 2>/dev/null; then
-            sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' scripts/dtc/dtc-lexer.l
-            sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' scripts/dtc/dtc-lexer.lex.c 2>/dev/null || true
+          # 4.4 + modern host headers
+          if grep -q 'Wno-declaration-after-statement' Makefile; then
+            echo already
+          else
+            sed -i 's/KBUILD_CFLAGS[[:space:]]*:=.*/& -Wno-declaration-after-statement -Wno-error=declaration-after-statement/' Makefile || true
           fi
 
-          # Fix any other yylloc in generated files
-          find scripts/dtc -name '*.c' -exec sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' {} + 2>/dev/null || true
+      - name: Fix host tool compatibility (GCC 11 vs 4.4 kernel)
+        working-directory: kernel
+        run: |
+          # Fix dtc yylloc multiple definition (GCC 10+ -fno-common)
+          if [ -f scripts/dtc/dtc-lexer.lex.c ]; then
+            sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' scripts/dtc/dtc-lexer.lex.c || true
+          fi
+          if [ -f scripts/dtc/dtc-lexer.l ]; then
+            sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' scripts/dtc/dtc-lexer.l || true
+          fi
+          export HOSTCFLAGS="-fcommon -Wno-error"
+          echo "HOSTCFLAGS=$HOSTCFLAGS" >> "$GITHUB_ENV"
 
       - name: Configure kernel
+        working-directory: kernel
         run: |
-          cd kernel
-          export ARCH=arm64
-          export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
-
-          # Generate base config
-          make O=out python=python2 $DEFCONFIG
-
-          # Merge board config
+          export PATH="$GITHUB_WORKSPACE/gcc49/bin:$PATH"
+          mkdir -p out
+          make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- python=python2 $DEFCONFIG
           if [ -f "arch/arm64/configs/$BOARD_DEFCONFIG" ]; then
             scripts/kconfig/merge_config.sh -m -O out out/.config "arch/arm64/configs/$BOARD_DEFCONFIG" 2>/dev/null || \
             cat "arch/arm64/configs/$BOARD_DEFCONFIG" >> out/.config
           fi
 
-          # Enable RKSU
-          scripts/config --file out/.config \
-            --enable KSU \
-            --enable KSU_MANUAL_HOOK \
-            --disable KPROBES \
-            --disable KSU_DEBUG \
-            --enable KALLSYMS \
-            --enable KALLSYMS_ALL \
-            --enable NAMESPACES \
-            --enable UTS_NS \
-            --enable IPC_NS \
-            --enable PID_NS \
-            --enable USER_NS \
-            --enable NET_NS \
-            --disable HW_ROOT_SCAN \
-            --enable OVERLAY_FS
+          if [ "$BUILD_MODE" = "rksu" ]; then
+            scripts/config --file out/.config \
+              --enable KSU \
+              --enable KSU_MANUAL_HOOK \
+              --disable KSU_DEBUG \
+              --disable KPROBES \
+              --enable KALLSYMS_ALL \
+              --enable NAMESPACES \
+              --disable HW_ROOT_SCAN \
+              --enable OVERLAY_FS
+          else
+            # baseline: match stock more closely, no root hooks
+            scripts/config --file out/.config \
+              --disable KSU \
+              --disable KSU_MANUAL_HOOK \
+              --disable KPROBES \
+              --disable KALLSYMS_ALL \
+              --enable NAMESPACES \
+              --disable HW_ROOT_SCAN \
+              --enable OVERLAY_FS \
+              --disable SECURITY_SELINUX_DEVELOP
+          fi
 
-          make O=out ARCH=arm64 python=python2 olddefconfig
+          # Align a few stock-ish debug/security bits that can affect early boot policy path
+          scripts/config --file out/.config --disable SECURITY_SELINUX_DEVELOP || true
 
-          echo "=== Config check ==="
-          for cfg in KSU KSU_MANUAL_HOOK KPROBES KALLSYMS_ALL NAMESPACES HW_ROOT_SCAN OVERLAY_FS; do
-            grep "CONFIG_${cfg}" out/.config || echo "CONFIG_${cfg} not found"
+          make O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- python=python2 olddefconfig
+
+          echo "=== Config check ($BUILD_MODE) ==="
+          for cfg in KSU KSU_MANUAL_HOOK KPROBES KALLSYMS_ALL NAMESPACES HW_ROOT_SCAN OVERLAY_FS SECURITY_SELINUX_DEVELOP; do
+            grep -E "CONFIG_${cfg}[ =]" out/.config || echo "CONFIG_${cfg} missing"
           done
 
       - name: Force python2 for MTK host scripts
-        run: |
-          bash "$GITHUB_WORKSPACE/fix_mtk_python.sh"
-
+        run: bash "$GITHUB_WORKSPACE/fix_mtk_python.sh"
 
       - name: Build kernel
+        working-directory: kernel
         run: |
-          export PATH="$GITHUB_WORKSPACE/bin:$PATH"
-          cd kernel
-          set -o pipefail
-          export ARCH=arm64
-          export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
-          export HOSTCFLAGS="-fcommon -Wno-error -Wno-error=declaration-after-statement"
-          export HOSTLDFLAGS=""
-
+          export PATH="$GITHUB_WORKSPACE/bin:$GITHUB_WORKSPACE/gcc49/bin:$PATH"
           make O=out \
             ARCH=arm64 \
+            CROSS_COMPILE=aarch64-linux-android- \
             python=python2 \
-            CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-" \
-            HOSTCFLAGS="-fcommon -Wno-error" \
-            KCFLAGS="-Wno-declaration-after-statement" \
-            -j$(nproc) 2>&1
-
-          # Check output
-          if [ -f out/arch/arm64/boot/Image.gz ]; then
-            echo "[+] Build SUCCESS: Image.gz"
-            ls -la out/arch/arm64/boot/Image.gz
-          elif [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
-            echo "[+] Build SUCCESS: Image.gz-dtb"
-            ls -la out/arch/arm64/boot/Image.gz-dtb
-          elif [ -f out/arch/arm64/boot/Image ]; then
-            echo "[+] Build SUCCESS: Image"
-            ls -la out/arch/arm64/boot/Image
-          else
-            echo "[-] Build FAILED: no kernel image found"
-            find out/arch/arm64/boot/ -type f 2>/dev/null
-            exit 1
-          fi
+            -j"$(nproc)"
 
       - name: Package kernel image
+        id: pkg
+        working-directory: kernel
         run: |
-          mkdir -p output
-          cd kernel/out/arch/arm64/boot
-          for img in Image.gz-dtb Image.gz Image; do
-            if [ -f "$img" ]; then
-              cp "$img" "$GITHUB_WORKSPACE/output/"
-              echo "Packaged: $img ($(stat -c%s "$img") bytes)"
-            fi
-          done
-          # Also grab DTB if present
-          find . -name '*.dtb' -exec cp {} "$GITHUB_WORKSPACE/output/" \; 2>/dev/null || true
+          mkdir -p "$GITHUB_WORKSPACE/outpkg"
+          if [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
+            cp out/arch/arm64/boot/Image.gz-dtb "$GITHUB_WORKSPACE/outpkg/"
+          fi
+          if [ -f out/arch/arm64/boot/Image.gz ]; then
+            cp out/arch/arm64/boot/Image.gz "$GITHUB_WORKSPACE/outpkg/"
+          fi
+          if [ -f out/arch/arm64/boot/Image ]; then
+            cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/outpkg/"
+          fi
+          # collect dtbs
+          find out/arch/arm64/boot/dts -name '*.dtb' -exec cp {} "$GITHUB_WORKSPACE/outpkg/" \; 2>/dev/null || true
+          ls -la "$GITHUB_WORKSPACE/outpkg"
+          echo "mode=$BUILD_MODE" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DRA-RKSU-kernel-${{ env.RKSU_TAG }}
-          path: output/
+          name: DRA-${{ env.BUILD_MODE }}-kernel-${{ env.RKSU_TAG }}
+          path: outpkg/*
 
       - name: Create Release
-        if: success()
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: rksu-${{ env.RKSU_TAG }}-${{ github.run_number }}
-          name: "DRA-AL00 RKSU ${{ env.RKSU_TAG }} Build #${{ github.run_number }}"
+          tag_name: ${{ env.BUILD_MODE }}-${{ env.RKSU_TAG }}-${{ github.run_number }}
+          name: "DRA-AL00 ${{ env.BUILD_MODE }} ${{ env.RKSU_TAG }} Build #${{ github.run_number }}"
           body: |
-            DRA-AL00 (MT6739) kernel 4.4.95 with RKSU ${{ env.RKSU_TAG }}
-            - Manual hook mode (no kprobes)
-            - KALLSYMS_ALL enabled
-            - HW_ROOT_SCAN disabled
-            - NAMESPACES enabled
-            - OVERLAY_FS enabled
-          files: output/*
+            DRA-AL00 (MT6739) kernel 4.4.95
+            mode=${{ env.BUILD_MODE }}
+            rksu=${{ env.RKSU_TAG }}
+            Infinite-reboot bisect build.
+          files: outpkg/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
