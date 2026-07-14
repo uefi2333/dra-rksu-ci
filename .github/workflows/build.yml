@@ -40,6 +40,21 @@ jobs:
           cd kernel
           echo "Kernel version: $(head -5 Makefile | grep -E 'VERSION|PATCHLEVEL|SUBLEVEL' | tr '\n' ' ')"
 
+      - name: Fix DrvGen.py Python 2->3 compatibility
+        run: |
+          cd kernel
+          # Fix print statement
+          python3 -c "
+with open('tools/dct/DrvGen.py') as f:
+    c = f.read()
+c = c.replace("print '''", "print('''" , 1)
+c = c.replace("'''\n", "''')\n" , 1)
+c = c.replace('except Exception, e:', 'except Exception as e:')
+with open('tools/dct/DrvGen.py', 'w') as f:
+    f.write(c)
+print('[+] Fixed DrvGen.py Python 2->3 compatibility')
+"
+
       - name: Download GCC 4.9 toolchain
         run: |
           # LineageOS GCC 4.9 aarch64
