@@ -126,6 +126,7 @@ jobs:
       - name: Build kernel
         run: |
           cd kernel
+          set -o pipefail
           export ARCH=arm64
           export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
           export HOSTCFLAGS="-fcommon -Wno-error"
@@ -136,7 +137,7 @@ jobs:
             python=python2 \
             CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-" \
             HOSTCFLAGS="-fcommon -Wno-error" \
-            -j$(nproc) 2>&1 | tail -100
+            -j$(nproc) 2>&1
 
           # Check output
           if [ -f out/arch/arm64/boot/Image.gz ]; then
