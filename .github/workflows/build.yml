@@ -89,11 +89,27 @@ jobs:
       - name: Fix host tool compatibility (GCC 11 vs 4.4 kernel)
         run: |
           cd kernel
-          if grep -rq 'YYLTYPE yylloc' scripts/dtc/dtc-lexer.l 2>/dev/null; then
-            sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' scripts/dtc/dtc-lexer.l
-            sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' scripts/dtc/dtc-lexer.lex.c 2>/dev/null || true
+          # modern host GCC defaults to -fno-common → yylloc multi-def in dtc
+          # Fix both source and SHIPPED pregenerated files; force -fcommon as backup.
+          for f in scripts/dtc/dtc-lexer.l scripts/dtc/dtc-lexer.lex.c                    scripts/dtc/dtc-parser.y scripts/dtc/dtc-parser.tab.c; do
+            [ -f "$f" ] || continue
+            sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' "$f" || true
+            sed -i 's/^YYLTYPE yylloc =/extern YYLTYPE yylloc;\/\/ was /' "$f" || true
+          done
+          # ensure only one definition remains: put definition in parser tab if both became extern
+          if ! grep -q '^YYLTYPE yylloc' scripts/dtc/dtc-parser.tab.c 2>/dev/null; then
+            if grep -q 'extern YYLTYPE yylloc' scripts/dtc/dtc-parser.tab.c 2>/dev/null; then
+              sed -i '0,/extern YYLTYPE yylloc;/s//YYLTYPE yylloc;/' scripts/dtc/dtc-parser.tab.c || true
+            fi
           fi
-          find scripts/dtc -name '*.c' -exec sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' {} + 2>/dev/null || true
+          # HOSTCFLAGS -fcommon for all host tools
+          if ! grep -q 'HOSTCFLAGS.*-fcommon' Makefile; then
+            sed -i '/^HOSTCFLAGS/ s|$| -fcommon|' Makefile || true
+            # also export for recursive makes
+            echo 'export HOSTCFLAGS += -fcommon' >> Makefile
+          fi
+          grep -n 'yylloc' scripts/dtc/dtc-lexer.l scripts/dtc/dtc-lexer.lex.c scripts/dtc/dtc-parser.tab.c 2>/dev/null | head -20 || true
+          echo "[+] dtc yylloc / -fcommon host fix applied"
 
       - name: Configure kernel
         run: |
@@ -177,7 +193,12 @@ jobs:
           export ARCH=arm64
           export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
           export PATH="$GITHUB_WORKSPACE/bin:$GITHUB_WORKSPACE/gcc49/bin:$PATH"
-          make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" python=python2 -j"$(nproc)" Image
+          export HOSTCFLAGS="-fcommon"
+          # re-apply yylloc fix in case SHIPPED regenerated earlier somehow
+          for f in scripts/dtc/dtc-lexer.l scripts/dtc/dtc-lexer.lex.c; do
+            [ -f "$f" ] && sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' "$f" || true
+          done
+          make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" python=python2 -j"$(nproc)" Image
           if [ -f out/arch/arm64/boot/Image ]; then
             echo "[+] Build SUCCESS: Image"
             ls -la out/arch/arm64/boot/Image
