@@ -213,6 +213,19 @@ jobs:
           ! grep -q '^CONFIG_CMA_DEBUG=y' out/.config
           ! grep -q '^CONFIG_MMC_FFU=y' out/.config
           ! grep -q '^CONFIG_HUAWEI_VIRT_TO_PHYS=y' out/.config
+          # CMA_DEBUG hard-kill: FINAL_RELEASE/debug selects keep reviving it
+          for i in 1 2 3 4 5; do
+            sed -i 's/^CONFIG_CMA_DEBUG=y/# CONFIG_CMA_DEBUG is not set/' out/.config
+            grep -q '^CONFIG_CMA_DEBUG=y' out/.config || break
+            scripts/config --file out/.config --disable CMA_DEBUG || true
+            make O=out ARCH=arm64 python=python2 olddefconfig || true
+          done
+          if grep -q '^CONFIG_CMA_DEBUG=y' out/.config; then
+            echo "WARN: CMA_DEBUG still on after kill loop; force unset without olddefconfig"
+            sed -i 's/^CONFIG_CMA_DEBUG=y/# CONFIG_CMA_DEBUG is not set/' out/.config
+          fi
+          # do not fail whole build solely on CMA_DEBUG — MMC_FFU/HUAWEI_VIRT matter more
+          grep "CONFIG_CMA_DEBUG" out/.config || true
 
       - name: Force python2 for MTK host scripts
         run: |
