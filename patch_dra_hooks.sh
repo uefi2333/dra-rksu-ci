@@ -4,7 +4,7 @@ set -e
 echo "[+] Patching DRA 4.4.95 kernel for RKSU manual hooks..."
 
 echo "[1/8] Patching fs/open.c (faccessat hook)..."
-python3 - <<'''PY
+python3 - <<'PY'
 from pathlib import Path
 p = Path("fs/open.c")
 lines = p.read_text().splitlines(keepends=True)
@@ -15,7 +15,7 @@ if "ksu_handle_faccessat" not in text:
     inserted = False
     for line in lines:
         if line.startswith("SYSCALL_DEFINE3(faccessat,"):
-            out.append("""#ifdef CONFIG_KSU_MANUAL_HOOK\n")
+            out.append("#ifdef CONFIG_KSU_MANUAL_HOOK\n")
             out.append("extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,\n")
             out.append("\t\t\t\tint *mode, int *flags);\n")
             out.append("#endif\n")
@@ -35,7 +35,7 @@ print("    [+] faccessat hook applied")
 PY
 
 echo "[2/8] Patching fs/exec.c (execve hook)..."
-python3 - <<'''PY
+python3 - <<'PY'
 from pathlib import Path
 import re
 p = Path("fs/exec.c")
@@ -43,18 +43,27 @@ t = p.read_text()
 if "ksu_handle_execveat" not in t:
     a = "int do_execve(struct filename *filename,"
     if a in t:
-        decl = """#ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,\n\t\t\t\tvoid *argv, void *envp, int *flags);\n#endif\n"""
+        decl = (
+            "#ifdef CONFIG_KSU_MANUAL_HOOK\n"
+            "extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,\n"
+            "\t\t\t\tvoid *argv, void *envp, int *flags);\n"
+            "#endif\n"
+        )
         t = t.replace(a, decl + a, 1)
     m = re.search(r"return do_execveat_common\([^;]+;", t)
     if m and "ksu_handle_execveat((int *)AT_FDCWD" not in t:
-        hook = """#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_execveat((int *)AT_FDCWD, &filename, (void *)&argv, (void *)&envp, 0);\n#endif\n\t"""
+        hook = (
+            "#ifdef CONFIG_KSU_MANUAL_HOOK\n"
+            "\tksu_handle_execveat((int *)AT_FDCWD, &filename, (void *)&argv, (void *)&envp, 0);\n"
+            "#endif\n\t"
+        )
         t = t[:m.start()] + hook + t[m.start():]
     p.write_text(t)
 print("    [+] execve hook applied")
 PY
 
 echo "[3/8] Patching fs/stat.c (stat hook)..."
-python3 - <<'''PY
+python3 - <<'PY'
 from pathlib import Path
 p = Path("fs/stat.c")
 lines = p.read_text().splitlines(keepends=True)
@@ -65,7 +74,7 @@ if "ksu_handle_stat" not in text:
     inserted = False
     for line in lines:
         if line.startswith("SYSCALL_DEFINE4(newfstatat,"):
-            out.append("""#ifdef CONFIG_KSU_MANUAL_HOOK\n")
+            out.append("#ifdef CONFIG_KSU_MANUAL_HOOK\n")
             out.append("extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);\n")
             out.append("#endif\n")
             in_nf = True
@@ -82,7 +91,7 @@ print("    [+] stat hook applied")
 PY
 
 echo "[4/8] Patching fs/read_write.c (read hook)..."
-python3 - <<'''PY
+python3 - <<'PY'
 from pathlib import Path
 p = Path("fs/read_write.c")
 lines = p.read_text().splitlines(keepends=True)
@@ -93,7 +102,7 @@ if "ksu_handle_sys_read" not in text:
     inserted = False
     for line in lines:
         if line.startswith("SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)"):
-            out.append("""#ifdef CONFIG_KSU_MANUAL_HOOK\n")
+            out.append("#ifdef CONFIG_KSU_MANUAL_HOOK\n")
             out.append("extern bool ksu_init_rc_hook __read_mostly;\n")
             out.append("extern int ksu_handle_sys_read(unsigned int fd, char __user **buf_ptr, size_t *count_ptr);\n")
             out.append("#endif\n")
@@ -111,7 +120,7 @@ print("    [+] read hook applied")
 PY
 
 echo "[5/8] Patching kernel/reboot.c (reboot hook)..."
-python3 - <<'''PY
+python3 - <<'PY'
 from pathlib import Path
 p = Path("kernel/reboot.c")
 lines = p.read_text().splitlines(keepends=True)
@@ -122,7 +131,7 @@ if "ksu_handle_sys_reboot" not in text:
     inserted = False
     for line in lines:
         if line.startswith("SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,"):
-            out.append("""#ifdef CONFIG_KSU_MANUAL_HOOK\n")
+            out.append("#ifdef CONFIG_KSU_MANUAL_HOOK\n")
             out.append("extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n")
             out.append("#endif\n")
             in_rb = True
@@ -138,7 +147,7 @@ print("    [+] reboot hook applied")
 PY
 
 echo "[6/8] Patching kernel/sys.c (setresuid hook)..."
-python3 - <<'''PY
+python3 - <<'PY'
 from pathlib import Path
 p = Path("kernel/sys.c")
 lines = p.read_text().splitlines(keepends=True)
@@ -149,7 +158,7 @@ if "ksu_handle_setresuid" not in text:
     inserted = False
     for line in lines:
         if line.startswith("SYSCALL_DEFINE3(setresuid, uid_t, ruid, uid_t, euid, uid_t, suid)"):
-            out.append("""#ifdef CONFIG_KSU_MANUAL_HOOK\n")
+            out.append("#ifdef CONFIG_KSU_MANUAL_HOOK\n")
             out.append("extern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);\n")
             out.append("#endif\n")
             in_sr = True
@@ -165,7 +174,7 @@ print("    [+] setresuid hook applied")
 PY
 
 echo "[7/8] Patching drivers/input/input.c (input hook)..."
-python3 - <<'''PY
+python3 - <<'PY'
 from pathlib import Path
 p = Path("drivers/input/input.c")
 lines = p.read_text().splitlines(keepends=True)
@@ -176,7 +185,7 @@ if "ksu_handle_input_handle_event" not in text:
     inserted = False
     for line in lines:
         if line.startswith("void input_event(struct input_dev *dev,"):
-            out.append("""#ifdef CONFIG_KSU_MANUAL_HOOK\n")
+            out.append("#ifdef CONFIG_KSU_MANUAL_HOOK\n")
             out.append("extern bool ksu_input_hook __read_mostly;\n")
             out.append("extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);\n")
             out.append("#endif\n")
