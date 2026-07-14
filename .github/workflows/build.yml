@@ -107,27 +107,52 @@ jobs:
             cat "arch/arm64/configs/$BOARD_DEFCONFIG" >> out/.config
           fi
 
-          # Enable RKSU
+          # Align timing/build flavor to stock first (WiFi/BT CONSYS is HZ-sensitive)
+          scripts/config --file out/.config \
+            --enable HZ_300 \
+            --disable HZ_250 \
+            --disable HZ_100 \
+            --disable HZ_1000 \
+            --set-val HZ 300 \
+            --enable FINAL_RELEASE \
+            --disable SCHED_DEBUG \
+            --disable DYNAMIC_DEBUG \
+            --disable CGROUP_DEBUG \
+            --disable CMA_DEBUG \
+            --disable SND_DEBUG \
+            --disable SND_DEBUG_VERBOSE \
+            --disable SND_PCM_XRUN_DEBUG \
+            --disable MMC_BLOCK_IO_LOG \
+            --disable MTK_LOCK_DEBUG \
+            --disable MTK_CPU_HOTPLUG_DEBUG_0 \
+            --disable MTK_CPU_HOTPLUG_DEBUG_2 \
+            --disable MTK_CPU_HOTPLUG_DEBUG_3 \
+            --disable SECURITY_SELINUX_DEVELOP \
+            --set-val LOG_BUF_SHIFT 19
+
+          # Enable RKSU (minimal extras)
           scripts/config --file out/.config \
             --enable KSU \
             --enable KSU_MANUAL_HOOK \
-            --disable KPROBES \
             --disable KSU_DEBUG \
-            --enable KALLSYMS \
-            --enable KALLSYMS_ALL \
+            --disable KPROBES \
+            --disable KALLSYMS_ALL \
             --enable NAMESPACES \
-            --enable UTS_NS \
-            --enable IPC_NS \
+            --enable NET_NS \
             --enable PID_NS \
             --enable USER_NS \
-            --enable NET_NS \
+            --enable UTS_NS \
             --disable HW_ROOT_SCAN \
             --enable OVERLAY_FS
 
           make O=out ARCH=arm64 python=python2 olddefconfig
 
+          # Force HZ again after olddefconfig (kconfig can flip)
+          scripts/config --file out/.config --enable HZ_300 --disable HZ_250 --set-val HZ 300
+          make O=out ARCH=arm64 python=python2 olddefconfig
+
           echo "=== Config check ==="
-          for cfg in KSU KSU_MANUAL_HOOK KPROBES KALLSYMS_ALL NAMESPACES HW_ROOT_SCAN OVERLAY_FS; do
+          for cfg in KSU KSU_MANUAL_HOOK KPROBES KALLSYMS_ALL NAMESPACES HW_ROOT_SCAN OVERLAY_FS HZ HZ_300 HZ_250 FINAL_RELEASE MTK_COMBO_WIFI MTK_COMBO_BT; do
             grep "CONFIG_${cfg}" out/.config || echo "CONFIG_${cfg} not found"
           done
 
