@@ -206,9 +206,13 @@ jobs:
             kill_off "$off"
           done
 
-          # prevent silent reconf during build
-          touch out/include/config/auto.conf out/.config
-          mkdir -p out/include/generated
+          # prevent silent reconf during build (dirs may not exist yet)
+          mkdir -p out/include/config out/include/generated
+          touch out/.config
+          # do not invent auto.conf if kbuild has not generated it; just ensure parent exists
+          if [ -f out/include/config/auto.conf ]; then
+            touch out/include/config/auto.conf
+          fi
           if [ -f out/include/generated/autoconf.h ]; then
             for off in CMA_DEBUG MMC_FFU HUAWEI_VIRT_TO_PHYS HUAWEI_TS_KIT_TEST MTK_BLOCK_TAG; do
               sed -i "/#define CONFIG_${off} /d" out/include/generated/autoconf.h || true
