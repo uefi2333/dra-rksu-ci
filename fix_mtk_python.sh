@@ -1,44 +1,22 @@
 #!/bin/bash
-# Force python2 for MTK host scripts and make multiple_dtbo.py binary-safe
+# Force python2 for MTK host scripts (multiple_dtbo.py / DrvGen)
+# Python2 str is bytes, so original text-mode open works on DTB.
 set -e
 mkdir -p "$GITHUB_WORKSPACE/bin"
 ln -sfn "$(command -v python2)" "$GITHUB_WORKSPACE/bin/python"
-export PATH="$GITHUB_WORKSPACE/bin:$PATH"
 echo "$GITHUB_WORKSPACE/bin" >> "$GITHUB_PATH"
+export PATH="$GITHUB_WORKSPACE/bin:$PATH"
 python --version
-
-python2 <<'PY'
-from pathlib import Path
-p = Path('kernel/scripts/multiple_dtbo.py')
-t = p.read_text()
-orig = t
-t = t.replace("open(output_file, 'w')", "open(output_file, 'wb')")
-t = t.replace("open(input_file, 'r')", "open(input_file, 'rb')")
-t = t.replace('fo.write("%s" % item)', 'fo.write(item)')
-# replace readlines loop with binary dump
-old1 = "\t\twith open(input_file, 'rb') as fi:\n\t\t\tfor line in fi.readlines():\n\t\t\t\tfo.write(line)"
-old2 = "\t\twith open(input_file, 'r') as fi:\n\t\t\tfor line in fi.readlines():\n\t\t\t\tfo.write(line)"
-new = "\t\twith open(input_file, 'rb') as fi:\n\t\t\tfo.write(fi.read())"
-if old1 in t:
-    t = t.replace(old1, new)
-elif old2 in t:
-    t = t.replace(old2, new)
-else:
-    # last resort: if still has readlines after open(input_file
-    if 'readlines()' in t and "open(input_file" in t:
-        import re
-        t = re.sub(
-            r"with open\(input_file, 'r[b]?'\) as fi:\n\t\t\tfor line in fi\.readlines\(\):\n\t\t\t\tfo\.write\(line\)",
-            "with open(input_file, 'rb') as fi:\n\t\t\tfo.write(fi.read())",
-            t,
-            count=1
-        )
-if t != orig:
-    p.write_text(t)
-    print('[+] patched multiple_dtbo.py binary I/O')
-else:
-    print('[!] no change to multiple_dtbo.py')
-    for i,l in enumerate(orig.splitlines(),1):
-        if 'open(output_file' in l or 'open(input_file' in l or 'readlines' in l or 'fo.write' in l:
-            print(i, repr(l))
-PY
+# also hard-rewrite shebang so env python cannot drift
+if [ -f kernel/scripts/multiple_dtbo.py ]; then
+  sed -i '1s|^#!.*|#!/usr/bin/env python2|' kernel/scripts/multiple_dtbo.py
+  echo "[+] multiple_dtbo.py shebang -> python2"
+fi
+# any other MTK python scripts that use env python
+find kernel/scripts kernel/tools -name '*.py' -type f 2>/dev/null | while read -r f; do
+  if head -1 "$f" | grep -q '#!/usr/bin/env python$'; then
+    sed -i '1s|^#!.*|#!/usr/bin/env python2|' "$f"
+    echo "[+] shebang python2: $f"
+  fi
+done
+echo "[+] python2 forced for MTK host scripts"
