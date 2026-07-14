@@ -129,14 +129,14 @@ jobs:
           set -o pipefail
           export ARCH=arm64
           export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
-          export HOSTCFLAGS="-fcommon -Wno-error"
+          export HOSTCFLAGS="-fcommon -Wno-error -Wno-error=declaration-after-statement"
           export HOSTLDFLAGS=""
 
           make O=out \
             ARCH=arm64 \
             python=python2 \
             CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-" \
-            HOSTCFLAGS="-fcommon -Wno-error" \
+            HOSTCFLAGS="-fcommon -Wno-error -Wno-error=declaration-after-statement" \
             -j$(nproc) 2>&1
 
           # Check output
