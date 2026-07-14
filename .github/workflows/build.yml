@@ -44,7 +44,7 @@ jobs:
       - name: Download GCC 4.9 toolchain
         run: |
           # LineageOS GCC 4.9 aarch64
-          git clone --depth=1 https://github.com/rockchip-android/prebuilts-gcc-linux-x86-aarch64-aarch64-linux-android-4.9 gcc49
+          git clone --depth=1 https://github.com/KudProject/aarch64-linux-android-4.9 gcc49
           export PATH="$GITHUB_WORKSPACE/gcc49/bin:$PATH"
           aarch64-linux-android-gcc --version | head -1
 
