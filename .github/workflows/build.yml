@@ -42,10 +42,7 @@ jobs:
 
       - name: Fix DrvGen.py Python 2->3 compatibility
         run: |
-          sed -i "s/print ''/'/'/'/print('''/'/'/'/'/" kernel/tools/dct/DrvGen.py || true
-          sed -i "s/^'''$/'/')'/'/" kernel/tools/dct/DrvGen.py || true
-          sed -i "s/except Exception, e:/except Exception as e:/" kernel/tools/dct/DrvGen.py
-
+          python3 fix_drvgen.py kernel/tools/dct/DrvGen.py
 
       - name: Download GCC 4.9 toolchain
         run: |
