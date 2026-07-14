@@ -133,47 +133,44 @@ jobs:
 
       - name: Force python2 for MTK host scripts
         run: |
-          # multiple_dtbo.py / DrvGen are Python2-era; runner `python` is 3.10
           mkdir -p "$GITHUB_WORKSPACE/bin"
           ln -sfn "$(command -v python2)" "$GITHUB_WORKSPACE/bin/python"
           echo "$GITHUB_WORKSPACE/bin" >> "$GITHUB_PATH"
           python --version
-          # Fix multiple_dtbo.py binary I/O (works under py2 and py3)
-          python2 - <<'PY'
+          # Fix multiple_dtbo.py binary I/O (py3 utf-8 text mode breaks on DTB)
+          python2 -c "
 from pathlib import Path
-p = Path("kernel/scripts/multiple_dtbo.py")
+p = Path('kernel/scripts/multiple_dtbo.py')
 t = p.read_text()
-old = """	with open(output_file, 'w') as fo:
-		for item in head:
-			fo.write("%s" % item)
-		with open(input_file, 'r') as fi:
+t2 = t
+t2 = t2.replace(\"open(output_file, 'w')\", \"open(output_file, 'wb')\")
+t2 = t2.replace(\"open(input_file, 'r')\", \"open(input_file, 'rb')\")
+t2 = t2.replace('fo.write(\"%s\" % item)', 'fo.write(item)')
+# replace text line copy loop with binary write
+old_loop = '''		with open(input_file, \'rb\') as fi:
 			for line in fi.readlines():
-				fo.write(line)
-			fi.close
-		fo.close"""
-new = """	with open(output_file, 'wb') as fo:
-		for item in head:
-			fo.write(item)
-		with open(input_file, 'rb') as fi:
-			fo.write(fi.read())
-			fi.close
-		fo.close"""
-if old not in t:
-    # tolerate mixed tabs/spaces: rewrite function body via markers
-    if "open(output_file, 'wb')" in t:
-        print("[+] multiple_dtbo.py already binary-safe")
-    else:
-        t = t.replace("open(output_file, 'w')", "open(output_file, 'wb')")
-        t = t.replace("open(input_file, 'r')", "open(input_file, 'rb')")
-        t = t.replace('fo.write("%s" % item)', "fo.write(item)")
-        t = t.replace("for line in fi.readlines():
-				fo.write(line)", "fo.write(fi.read())")
-        p.write_text(t)
-        print("[+] patched multiple_dtbo.py binary I/O")
+				fo.write(line)'''
+new_loop = '''		with open(input_file, \'rb\') as fi:
+			fo.write(fi.read())'''
+if old_loop in t2:
+    t2 = t2.replace(old_loop, new_loop)
 else:
-    p.write_text(t.replace(old, new))
-    print("[+] patched multiple_dtbo.py exact match")
-PY
+    # fallback if still text mode pattern
+    old_loop2 = '''		with open(input_file, \'r\') as fi:
+			for line in fi.readlines():
+				fo.write(line)'''
+    if old_loop2 in t2:
+        t2 = t2.replace(old_loop2, new_loop)
+if t2 != t:
+    p.write_text(t2)
+    print('[+] patched multiple_dtbo.py binary I/O')
+else:
+    print('[!] multiple_dtbo.py pattern not changed; dumping snippet')
+    for i,l in enumerate(t.splitlines(),1):
+        if 'open(output_file' in l or 'open(input_file' in l or 'readlines' in l or 'fo.write' in l:
+            print(i, l)
+"
+
 
       - name: Build kernel
         run: |
