@@ -128,24 +128,24 @@ jobs:
               cat "arch/arm64/configs/$BOARD_DEFCONFIG" >> out/.config
           fi
 
-          # Stock-align from extracted stock ikconfig (WiFi/BT/call/battery)
+          # HARD stock-align for WiFi/USB/battery.
+          # Do NOT force MMC_FFU / HUAWEI_VIRT_TO_PHYS / HUAWEI_TS_KIT_TEST / CMA_DEBUG —
+          # stock ikconfig has them off/n. Previous builds kept them on and broke power/usb/wlan.
           scripts/config --file out/.config \
             --enable HZ_300 --disable HZ_250 --disable HZ_100 --disable HZ_1000 --set-val HZ 300 \
             --enable FINAL_RELEASE \
             --disable SCHED_DEBUG --disable DYNAMIC_DEBUG --disable CGROUP_DEBUG --disable CMA_DEBUG \
             --disable SND_DEBUG --disable SND_DEBUG_VERBOSE --disable SND_PCM_XRUN_DEBUG \
-            --disable MMC_BLOCK_IO_LOG \
+            --disable MMC_BLOCK_IO_LOG --disable MTK_BLOCK_TAG \
             --disable MTK_LOCK_DEBUG --disable MTK_CPU_HOTPLUG_DEBUG_0 \
             --disable MTK_CPU_HOTPLUG_DEBUG_2 --disable MTK_CPU_HOTPLUG_DEBUG_3 \
             --disable SECURITY_SELINUX_DEVELOP \
             --set-val LOG_BUF_SHIFT 19 \
-            --enable MMC_FFU --enable MTK_BLOCK_TAG \
-            --enable HUAWEI_VIRT_TO_PHYS --enable HUAWEI_TS_KIT_TEST \
-            --disable SW_BRAND_HONOR --disable SW_BRAND_HUAWEI
+            --disable MMC_FFU \
+            --disable HUAWEI_VIRT_TO_PHYS --disable HUAWEI_TS_KIT_TEST \
+            --disable SW_BRAND_HONOR --disable SW_BRAND_HUAWEI || true
 
-          # ReSukiSU core
-          # KALLSYMS_ALL=y skips static_export_check entirely (official tip)
-          # AUTO_* hooks stay default y (LSM path for setuid/initrc/input on 4.4)
+          # ReSukiSU core only. Keep KALLSYMS_ALL for static_export_check skip.
           scripts/config --file out/.config \
             --enable KSU \
             --enable KSU_MANUAL_HOOK \
@@ -165,34 +165,54 @@ jobs:
 
           make O=out ARCH=arm64 python=python2 olddefconfig
 
-          # force again after olddefconfig (choice / selects can flip)
+          # force stock-critical again after olddefconfig (selects re-enable debug)
           scripts/config --file out/.config \
             --enable HZ_300 --disable HZ_250 --set-val HZ 300 \
-            --enable FINAL_RELEASE --disable CMA_DEBUG --disable DYNAMIC_DEBUG \
-            --enable MMC_FFU --enable MTK_BLOCK_TAG \
-            --enable HUAWEI_VIRT_TO_PHYS --enable HUAWEI_TS_KIT_TEST \
+            --enable FINAL_RELEASE \
+            --disable CMA_DEBUG --disable DYNAMIC_DEBUG --disable SCHED_DEBUG \
+            --disable SND_DEBUG --disable SND_DEBUG_VERBOSE --disable MMC_BLOCK_IO_LOG \
+            --disable MMC_FFU --disable MTK_BLOCK_TAG \
+            --disable HUAWEI_VIRT_TO_PHYS --disable HUAWEI_TS_KIT_TEST \
             --enable KSU --enable KSU_MANUAL_HOOK --disable KSU_TRACEPOINT_HOOK \
             --enable KALLSYMS --enable KALLSYMS_ALL || true
           make O=out ARCH=arm64 python=python2 olddefconfig
-          # third pass: debug options reappear via selects
+
+          # third pass + raw sed kill for options that reappear via depends
           scripts/config --file out/.config \
             --disable CMA_DEBUG --disable DYNAMIC_DEBUG --disable SCHED_DEBUG \
             --disable SND_DEBUG --disable SND_DEBUG_VERBOSE --disable MMC_BLOCK_IO_LOG \
+            --disable MMC_FFU --disable MTK_BLOCK_TAG \
+            --disable HUAWEI_VIRT_TO_PHYS --disable HUAWEI_TS_KIT_TEST \
             --enable HZ_300 --disable HZ_250 --set-val HZ 300 --enable FINAL_RELEASE || true
+          # raw force: scripts/config sometimes no-ops on hidden options
+          for off in CMA_DEBUG MMC_FFU MTK_BLOCK_TAG HUAWEI_VIRT_TO_PHYS HUAWEI_TS_KIT_TEST DYNAMIC_DEBUG SCHED_DEBUG MMC_BLOCK_IO_LOG; do
+            sed -i "s/^CONFIG_${off}=y/# CONFIG_${off} is not set/" out/.config || true
+            sed -i "/^CONFIG_${off}=/d" out/.config || true
+            grep -q "CONFIG_${off}" out/.config || echo "# CONFIG_${off} is not set" >> out/.config
+          done
           make O=out ARCH=arm64 python=python2 olddefconfig
+          # fourth pass after olddefconfig may re-select
+          for off in CMA_DEBUG MMC_FFU MTK_BLOCK_TAG HUAWEI_VIRT_TO_PHYS HUAWEI_TS_KIT_TEST; do
+            sed -i "s/^CONFIG_${off}=y/# CONFIG_${off} is not set/" out/.config || true
+          done
 
           echo "=== Config check ==="
           for cfg in KSU KSU_MANUAL_HOOK KSU_TRACEPOINT_HOOK KSU_MANUAL_HOOK_AUTO_SETUID_HOOK \
                      KSU_MANUAL_HOOK_AUTO_INITRC_HOOK KSU_MANUAL_HOOK_AUTO_INPUT_HOOK \
                      KPROBES KALLSYMS KALLSYMS_ALL NAMESPACES HW_ROOT_SCAN OVERLAY_FS \
-                     HZ HZ_300 FINAL_RELEASE CMA_DEBUG MMC_FFU MTK_BLOCK_TAG HUAWEI_VIRT_TO_PHYS KSU_MULTI_MANAGER_SUPPORT; do
+                     HZ HZ_300 FINAL_RELEASE CMA_DEBUG MMC_FFU MTK_BLOCK_TAG HUAWEI_VIRT_TO_PHYS HUAWEI_TS_KIT_TEST; do
             grep "CONFIG_${cfg}" out/.config || echo "CONFIG_${cfg} not found"
           done
 
-          # hard fail if critical off
+          # hard fail if critical off / stock-unsafe still on
           grep -q '^CONFIG_KSU=y' out/.config
           grep -q '^CONFIG_KSU_MANUAL_HOOK=y' out/.config
           grep -q '^CONFIG_KALLSYMS_ALL=y' out/.config
+          grep -q '^CONFIG_HZ=300' out/.config
+          grep -q '^CONFIG_FINAL_RELEASE=y' out/.config
+          ! grep -q '^CONFIG_CMA_DEBUG=y' out/.config
+          ! grep -q '^CONFIG_MMC_FFU=y' out/.config
+          ! grep -q '^CONFIG_HUAWEI_VIRT_TO_PHYS=y' out/.config
 
       - name: Force python2 for MTK host scripts
         run: |
@@ -242,6 +262,6 @@ jobs:
             DRA-AL00 (MT6739) 4.4.95 + ReSukiSU @ ${{ env.RESUKISU_REF }}
             - MANUAL_HOOK + AUTO setuid/initrc/input
             - KALLSYMS_ALL=y + static exports
-            - HZ=300 FINAL_RELEASE stock-align
+            - HZ=300 FINAL_RELEASE strict stock-align (no MMC_FFU/HUAWEI_VIRT/CMA_DEBUG)
             - multi-manager support
           files: output/*
