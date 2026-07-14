@@ -210,45 +210,68 @@ PY
 echo "[4/5] kernel/reboot.c sys_reboot"
 python3 - <<'PY'
 from pathlib import Path
+import re
 p = Path("kernel/reboot.c")
 if not p.exists():
     p = Path("kernel/sys.c")
 t = p.read_text()
+# strip any previous bad injection first
+t = re.sub(
+    r"\n#ifdef CONFIG_KSU_MANUAL_HOOK\n"
+    r"extern int ksu_handle_sys_reboot\(int magic1, int magic2, unsigned int cmd, void __user \*\*arg\);\n"
+    r"#endif\n",
+    "\n",
+    t,
+)
+t = re.sub(
+    r"\n#ifdef CONFIG_KSU_MANUAL_HOOK\n"
+    r"\tksu_handle_sys_reboot\(magic1, magic2, cmd, &arg\);\n"
+    r"#endif\n",
+    "\n",
+    t,
+)
 if "ksu_handle_sys_reboot" in t:
-    print("    already patched")
-else:
-    lines = t.splitlines(keepends=True)
-    out = []
-    inserted_decl = False
-    inserted_call = False
-    in_rb = False
-    for line in lines:
-        if (not inserted_decl) and line.startswith("SYSCALL_DEFINE4(reboot,"):
-            out.append("#ifdef CONFIG_KSU_MANUAL_HOOK\n")
-            out.append("extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n")
-            out.append("#endif\n")
-            out.append("\n")
-            inserted_decl = True
-            in_rb = True
-        out.append(line)
-        if in_rb and (not inserted_call):
-            # after first locals block line with "int ret"
-            if "int ret" in line and "ret =" not in line:
-                out.append("\n")
-                out.append("#ifdef CONFIG_KSU_MANUAL_HOOK\n")
-                out.append("\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n")
-                out.append("#endif\n")
-                inserted_call = True
-                in_rb = False
-    if not inserted_decl or not inserted_call:
-        # fallback: inject right after opening brace of reboot syscall
-        t2 = "".join(out) if out else t
-        if "ksu_handle_sys_reboot" not in t2:
-            raise SystemExit(f"reboot patch failed decl={inserted_decl} call={inserted_call}")
-        p.write_text(t2)
-    else:
-        p.write_text("".join(out))
-    print(f"    [+] reboot in {p}")
+    print("    still has leftover reboot hook, abort")
+    raise SystemExit(1)
+
+# find SYSCALL_DEFINE4(reboot,
+m = re.search(r"^SYSCALL_DEFINE4\(reboot,", t, re.M)
+if not m:
+    raise SystemExit("SYSCALL_DEFINE4(reboot not found")
+# insert decl just before the define
+decl = (
+    "#ifdef CONFIG_KSU_MANUAL_HOOK\n"
+    "extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n"
+    "#endif\n\n"
+)
+t = t[: m.start()] + decl + t[m.start() :]
+# re-find after insert
+m = re.search(r"^SYSCALL_DEFINE4\(reboot,", t, re.M)
+brace = t.find("{", m.end())
+if brace < 0:
+    raise SystemExit("reboot syscall brace not found")
+hook = (
+    "\n#ifdef CONFIG_KSU_MANUAL_HOOK\n"
+    "\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n"
+    "#endif"
+)
+t = t[: brace + 1] + hook + t[brace + 1 :]
+p.write_text(t)
+print(f"    [+] reboot hook in {p} at brace {brace}")
+# sanity: must appear inside SYSCALL_DEFINE4(reboot body, not in run_cmd
+idx = t.find("ksu_handle_sys_reboot(magic1")
+run_cmd = t.find("run_cmd(")
+syscall = t.find("SYSCALL_DEFINE4(reboot,")
+if idx < 0 or (run_cmd > 0 and run_cmd < idx and syscall > run_cmd):
+    # ok if syscall before call; fail if call is after run_cmd definition that is before syscall? 
+    pass
+# ensure the call is after the reboot define
+if idx < syscall:
+    raise SystemExit("hook before syscall define")
+# if run_cmd exists between syscall and hook, fail
+if run_cmd > syscall and run_cmd < idx:
+    raise SystemExit("hook landed after run_cmd — wrong function")
+print("    [+] reboot hook position OK")
 PY
 
 # ---------- 5) 4.4 compat: groups_sort unstatic + SELinux statics ----------
