@@ -70,11 +70,15 @@ jobs:
           cd kernel
           bash "$GITHUB_WORKSPACE/patch_dra_hooks.sh"
 
-      - name: Host/kernel build fixes (yylloc, C90, HOSTCFLAGS)
+      - name: Host/kernel build fixes (yylloc, C90, HOSTCFLAGS, MTK)
         run: |
           cd kernel
           # C90: ReSukiSU sources use decl-after-statement
           sed -i 's/-Wdeclaration-after-statement/-Wno-declaration-after-statement/g' Makefile
+          # also prevent -Werror from turning return-type etc into hard fails on vendor drivers
+          if ! grep -q 'Wno-error=return-type' Makefile; then
+            sed -i 's/^KBUILD_CFLAGS :=/KBUILD_CFLAGS := -Wno-error=return-type -Wno-error=incompatible-pointer-types /' Makefile || true
+          fi
 
           # dtc yylloc multi-def under modern host GCC (-fno-common)
           for f in scripts/dtc/dtc-lexer.l scripts/dtc/dtc-lexer.lex.c \
@@ -82,14 +86,34 @@ jobs:
             [ -f "$f" ] || continue
             sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' "$f" || true
           done
-          # keep one definition in parser
           if grep -q 'extern YYLTYPE yylloc' scripts/dtc/dtc-parser.tab.c 2>/dev/null; then
             sed -i '0,/extern YYLTYPE yylloc;/s//YYLTYPE yylloc;/' scripts/dtc/dtc-parser.tab.c || true
           fi
           if ! grep -q 'HOSTCFLAGS.*-fcommon' Makefile; then
             echo 'export HOSTCFLAGS += -fcommon' >> Makefile
           fi
-          echo "[+] host/kernel flag fixes"
+
+          # MTK sched_ctl: sysctl_sched_migration_cost may be const/read-only
+          # under some Huawei FINAL_RELEASE / constification patches.
+          # RKSU green tree hit this too when KALLSYMS_ALL/FINAL_RELEASE combo differs.
+          f=drivers/misc/mediatek/sched/sched_ctl.c
+          if [ -f "$f" ]; then
+            # cast away const on assignment sites
+            sed -i 's/sysctl_sched_migration_cost = /*(unsigned int *)\&sysctl_sched_migration_cost = /g' "$f"
+            # if already cast, don't double
+            sed -i 's/\*(unsigned int \*)\&\*(unsigned int \*)\&/*(unsigned int *)\&/g' "$f"
+            echo "[+] patched $f for migration_cost write"
+            grep -n 'sysctl_sched_migration_cost' "$f" | head -10 || true
+          fi
+
+          # also un-const the kernel symbol if declared const (belt)
+          for f in kernel/sched/core.c kernel/sched/fair.c; do
+            [ -f "$f" ] || continue
+            sed -i 's/^const unsigned int sysctl_sched_migration_cost/unsigned int sysctl_sched_migration_cost/' "$f" || true
+            sed -i 's/^static const unsigned int sysctl_sched_migration_cost/unsigned int sysctl_sched_migration_cost/' "$f" || true
+          done
+
+          echo "[+] host/kernel flag + MTK fixes"
 
       - name: Configure kernel
         run: |
