@@ -42,23 +42,13 @@ jobs:
 
       - name: Fix DrvGen.py Python 2->3 compatibility
         run: |
-          cd kernel
-          # Fix 1: print """ -> print("""
-          sed -i 's/print """/print("""/g' tools/dct/DrvGen.py
-          # Fix 2: close the triple-quote with parenthesis
-          sed -i 's/""")\n\nif __name__/""")\n\nif __name__/g' tools/dct/DrvGen.py
-          # Actually use python3 to do the complex replacement
-          python3 -c "
-import re
-with open('tools/dct/DrvGen.py') as f:
-    c = f.read()
-c = c.replace('print """', 'print("""')
-c = re.sub(r'"""\n(?=\n)', '""")\n', c)
-c = c.replace('except Exception, e:', 'except Exception as e:')
-with open('tools/dct/DrvGen.py', 'w') as f:
-    f.write(c)
-print('[+] Fixed DrvGen.py')
-"
+          cd kernel/tools/dct
+          # Fix print """ -> print("""
+          sed -i 's/print """/print("""/g' DrvGen.py
+          # Fix except Exception, e:
+          sed -i 's/except Exception, e:/except Exception as e:/g' DrvGen.py
+          # Fix closing triple-quote - add ) before the blank line after """
+          sed -i '/"""$/N;s/"""\n\n/""")\n\n/' DrvGen.py
       - name: Download GCC 4.9 toolchain
         run: |
           # LineageOS GCC 4.9 aarch64
