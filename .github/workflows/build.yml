@@ -42,17 +42,21 @@ jobs:
 
       - name: Fix DrvGen.py Python 2->3 compatibility
         run: |
-          python3 -c "
+          cat > /tmp/fix_drvgen.py << 'PYEOF'
 import re
 with open('kernel/tools/dct/DrvGen.py') as f:
     c = f.read()
 c = c.replace('print """', 'print("""')
-c = re.sub(r'"""\n(?=\n)', '"""\n)\n', c)
+c = re.sub(r'"""
+(?=
+)', '""")
+', c)
 c = c.replace('except Exception, e:', 'except Exception as e:')
 with open('kernel/tools/dct/DrvGen.py', 'w') as f:
     f.write(c)
 print('[+] Fixed DrvGen.py')
-"
+PYEOF
+          python3 /tmp/fix_drvgen.py
       - name: Download GCC 4.9 toolchain
         run: |
           # LineageOS GCC 4.9 aarch64
