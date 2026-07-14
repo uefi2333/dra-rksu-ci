@@ -115,6 +115,18 @@ jobs:
 
           echo "[+] host/kernel flag + MTK fixes"
 
+      - name: Kconfig kill CMA_DEBUG
+        run: |
+          cd kernel
+          # force CMA_DEBUG / CMA_DEBUGFS depends on BROKEN
+          sed -i '/^config CMA_DEBUG$/{n;n;s/^/\tdepends on BROKEN\n/;}' mm/Kconfig || true
+          sed -i '/^config CMA_DEBUGFS$/{n;n;s/^/\tdepends on BROKEN\n/;}' mm/Kconfig || true
+          # if already has depends, leave; strip any select CMA_DEBUG
+          grep -Rnl 'select CMA_DEBUG' --include='Kconfig*' . 2>/dev/null | while read -r f; do
+            sed -i 's/select CMA_DEBUG/# select CMA_DEBUG  # killed/g' "$f" || true
+          done
+          echo "CMA_DEBUG block:"; awk '/^config CMA_DEBUG$/{c=1} c&&NR{print; if(/^config /&&!/^config CMA_DEBUG$/){exit}}' mm/Kconfig | head -20
+
       - name: Configure kernel
         run: |
           cd kernel
