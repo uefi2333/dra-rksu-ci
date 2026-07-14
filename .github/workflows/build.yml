@@ -74,11 +74,10 @@ jobs:
       - name: Suppress C90 declaration-after-statement error in kernel Makefile
         run: |
           cd kernel
-          # Strip -Werror=declaration-after-statement from KBUILD_CFLAGS
-          sed -i 's/-Werror=declaration-after-statement/-Wno-error=declaration-after-statement/g' Makefile
-          # Also check if it's added via cc-option
-          sed -i 's/$(call cc-option,-Werror=declaration-after-statement)/$(call cc-option,-Wno-error=declaration-after-statement)/g' Makefile
-          echo "[+] Stripped -Werror=declaration-after-statement from kernel Makefile"
+          # real flag is -Wdeclaration-after-statement (Makefile ~L790)
+          sed -i 's/-Wdeclaration-after-statement/-Wno-declaration-after-statement/g' Makefile
+          grep -n "declaration-after-statement" Makefile || true
+          echo "[+] Disabled -Wdeclaration-after-statement"
 
       - name: Fix host tool compatibility (GCC 11 vs 4.4 kernel)
         run: |
@@ -145,7 +144,8 @@ jobs:
             ARCH=arm64 \
             python=python2 \
             CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-" \
-            HOSTCFLAGS="-fcommon -Wno-error -Wno-error=declaration-after-statement" \
+            HOSTCFLAGS="-fcommon -Wno-error" \
+            KCFLAGS="-Wno-declaration-after-statement" \
             -j$(nproc) 2>&1
 
           # Check output
