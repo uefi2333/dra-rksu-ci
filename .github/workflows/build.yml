@@ -71,6 +71,15 @@ jobs:
           cd kernel
           bash "$GITHUB_WORKSPACE/patch_dra_hooks.sh"
 
+      - name: Suppress C90 declaration-after-statement error in kernel Makefile
+        run: |
+          cd kernel
+          # Strip -Werror=declaration-after-statement from KBUILD_CFLAGS
+          sed -i 's/-Werror=declaration-after-statement/-Wno-error=declaration-after-statement/g' Makefile
+          # Also check if it's added via cc-option
+          sed -i 's/$(call cc-option,-Werror=declaration-after-statement)/$(call cc-option,-Wno-error=declaration-after-statement)/g' Makefile
+          echo "[+] Stripped -Werror=declaration-after-statement from kernel Makefile"
+
       - name: Fix host tool compatibility (GCC 11 vs 4.4 kernel)
         run: |
           cd kernel
