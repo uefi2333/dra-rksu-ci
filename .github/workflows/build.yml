@@ -16,7 +16,7 @@ jobs:
 
     env:
       KERNEL_REPO: https://github.com/paperluigis/android-huawei-dura-kernel
-      KERNEL_BRANCH: master
+      KERNEL_BRANCH: og
       DEFCONFIG: dura64_defconfig
       BOARD_DEFCONFIG: dura64_board_AL00A_defconfig
       ARCH: arm64
