@@ -1,12 +1,12 @@
-name: Build DRA-AL00 Kernel with RKSU
+name: Build DRA-AL00 Kernel with ReSukiSU
 
 on:
   workflow_dispatch:
     inputs:
-      rksu_tag:
-        description: 'RKSU tag/branch (e.g. v1.0.5-83-legacy)'
+      resukisu_ref:
+        description: 'ReSukiSU tag/branch (main recommended for latest manager)'
         required: false
-        default: 'v1.0.5-83-legacy'
+        default: 'main'
 
 jobs:
   build:
@@ -20,8 +20,8 @@ jobs:
       DEFCONFIG: dura64_defconfig
       BOARD_DEFCONFIG: dura64_board_AL00A_defconfig
       ARCH: arm64
-      RKSU_REPO: https://github.com/rsuntk/KernelSU
-      RKSU_TAG: ${{ github.event.inputs.rksu_tag || 'v1.0.5-83-legacy' }}
+      RESUKISU_REPO: https://github.com/ReSukiSU/ReSukiSU
+      RESUKISU_REF: ${{ github.event.inputs.resukisu_ref || 'main' }}
 
     steps:
       - name: Checkout CI repo
@@ -40,31 +40,39 @@ jobs:
           cd kernel
           echo "Kernel version: $(head -5 Makefile | grep -E 'VERSION|PATCHLEVEL|SUBLEVEL' | tr '\n' ' ')"
 
-
       - name: Download GCC 4.9 toolchain
         run: |
-          # LineageOS GCC 4.9 aarch64
           git clone --depth=1 https://github.com/KudProject/aarch64-linux-android-4.9 gcc49
           export PATH="$GITHUB_WORKSPACE/gcc49/bin:$PATH"
           aarch64-linux-android-gcc --version | head -1
 
-      - name: Integrate RKSU
+      - name: Integrate ReSukiSU
         run: |
           cd kernel
-          # Clone RKSU
-          git clone --depth=1 -b main $RKSU_REPO KernelSU
-          cd KernelSU && git fetch --tags && git checkout $RKSU_TAG && cd ..
+          git clone --depth=1 $RESUKISU_REPO KernelSU
+          cd KernelSU
+          git fetch --depth=1 origin $RESUKISU_REF || true
+          git checkout $RESUKISU_REF || git checkout FETCH_HEAD || true
+          echo "ReSukiSU ref: $(git rev-parse --short HEAD) $(git describe --tags --always 2>/dev/null || true)"
+          cd ..
 
-          # Symlink into drivers/
-          ln -sf "$(realpath KernelSU/kernel)" drivers/kernelsu
+          # Symlink drivers/kernelsu -> KernelSU/kernel
+          ln -sfn "$(realpath KernelSU/kernel)" drivers/kernelsu
 
-          # Patch drivers/Makefile
-          echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
+          # Makefile
+          if ! grep -q 'kernelsu/' drivers/Makefile; then
+            echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
+          fi
 
-          # Patch drivers/Kconfig
-          sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+          # Kconfig source
+          if ! grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig; then
+            sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+          fi
 
-          echo "[+] RKSU integrated at $RKSU_TAG"
+          # sanity
+          test -f drivers/kernelsu/Kconfig
+          ls -la drivers/kernelsu | head
+          echo "[+] ReSukiSU integrated"
 
       - name: Apply manual hooks patch
         run: |
@@ -74,7 +82,6 @@ jobs:
       - name: Suppress C90 declaration-after-statement error in kernel Makefile
         run: |
           cd kernel
-          # real flag is -Wdeclaration-after-statement (Makefile ~L790)
           sed -i 's/-Wdeclaration-after-statement/-Wno-declaration-after-statement/g' Makefile
           grep -n "declaration-after-statement" Makefile || true
           echo "[+] Disabled -Wdeclaration-after-statement"
@@ -82,14 +89,10 @@ jobs:
       - name: Fix host tool compatibility (GCC 11 vs 4.4 kernel)
         run: |
           cd kernel
-
-          # Fix dtc yylloc multiple definition (GCC 10+ -fno-common)
           if grep -rq 'YYLTYPE yylloc' scripts/dtc/dtc-lexer.l 2>/dev/null; then
             sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' scripts/dtc/dtc-lexer.l
             sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' scripts/dtc/dtc-lexer.lex.c 2>/dev/null || true
           fi
-
-          # Fix any other yylloc in generated files
           find scripts/dtc -name '*.c' -exec sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' {} + 2>/dev/null || true
 
       - name: Configure kernel
@@ -98,16 +101,14 @@ jobs:
           export ARCH=arm64
           export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
 
-          # Generate base config
           make O=out python=python2 $DEFCONFIG
 
-          # Merge board config
           if [ -f "arch/arm64/configs/$BOARD_DEFCONFIG" ]; then
             scripts/kconfig/merge_config.sh -m -O out out/.config "arch/arm64/configs/$BOARD_DEFCONFIG" 2>/dev/null || \
             cat "arch/arm64/configs/$BOARD_DEFCONFIG" >> out/.config
           fi
 
-          # Align timing/build flavor to stock first (WiFi/BT CONSYS is HZ-sensitive)
+          # Align to stock timing/flavor (WiFi/BT CONSYS is HZ-sensitive)
           scripts/config --file out/.config \
             --enable HZ_300 \
             --disable HZ_250 \
@@ -130,12 +131,15 @@ jobs:
             --disable SECURITY_SELINUX_DEVELOP \
             --set-val LOG_BUF_SHIFT 19
 
-          # Enable RKSU (minimal extras)
+          # ReSukiSU: force manual hook path (4.4 cannot use GKI tracepoints)
           scripts/config --file out/.config \
             --enable KSU \
             --enable KSU_MANUAL_HOOK \
             --disable KSU_DEBUG \
+            --disable KSU_TRACEPOINT_HOOK \
+            --disable KSU_SUSFS \
             --disable KPROBES \
+            --enable KALLSYMS \
             --disable KALLSYMS_ALL \
             --enable NAMESPACES \
             --enable NET_NS \
@@ -143,16 +147,23 @@ jobs:
             --enable USER_NS \
             --enable UTS_NS \
             --disable HW_ROOT_SCAN \
-            --enable OVERLAY_FS
+            --enable OVERLAY_FS \
+            --enable KSU_MULTI_MANAGER_SUPPORT || true
+
+          # optional configs may not exist on older Kconfig (v4.x); ignore failures
+          scripts/config --file out/.config --disable KPM 2>/dev/null || true
+          scripts/config --file out/.config --enable KSU_MANUAL_SU 2>/dev/null || true
 
           make O=out ARCH=arm64 python=python2 olddefconfig
 
-          # Force HZ again after olddefconfig (kconfig can flip)
+          # Force HZ again after olddefconfig
           scripts/config --file out/.config --enable HZ_300 --disable HZ_250 --set-val HZ 300
+          # Force manual hook again (choice can flip)
+          scripts/config --file out/.config --enable KSU --enable KSU_MANUAL_HOOK --disable KSU_TRACEPOINT_HOOK 2>/dev/null || true
           make O=out ARCH=arm64 python=python2 olddefconfig
 
           echo "=== Config check ==="
-          for cfg in KSU KSU_MANUAL_HOOK KPROBES KALLSYMS_ALL NAMESPACES HW_ROOT_SCAN OVERLAY_FS HZ HZ_300 HZ_250 FINAL_RELEASE MTK_COMBO_WIFI MTK_COMBO_BT; do
+          for cfg in KSU KSU_MANUAL_HOOK KSU_TRACEPOINT_HOOK KPROBES KALLSYMS_ALL NAMESPACES HW_ROOT_SCAN OVERLAY_FS HZ HZ_300 HZ_250 FINAL_RELEASE MTK_COMBO_WIFI MTK_COMBO_BT KSU_MULTI_MANAGER_SUPPORT; do
             grep "CONFIG_${cfg}" out/.config || echo "CONFIG_${cfg} not found"
           done
 
@@ -160,38 +171,19 @@ jobs:
         run: |
           bash "$GITHUB_WORKSPACE/fix_mtk_python.sh"
 
-
       - name: Build kernel
         run: |
-          export PATH="$GITHUB_WORKSPACE/bin:$PATH"
           cd kernel
-          set -o pipefail
           export ARCH=arm64
           export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
-          export HOSTCFLAGS="-fcommon -Wno-error -Wno-error=declaration-after-statement"
-          export HOSTLDFLAGS=""
-
-          make O=out \
-            ARCH=arm64 \
-            python=python2 \
-            CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-" \
-            HOSTCFLAGS="-fcommon -Wno-error" \
-            KCFLAGS="-Wno-declaration-after-statement" \
-            -j$(nproc) 2>&1
-
-          # Check output
-          if [ -f out/arch/arm64/boot/Image.gz ]; then
-            echo "[+] Build SUCCESS: Image.gz"
-            ls -la out/arch/arm64/boot/Image.gz
-          elif [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
-            echo "[+] Build SUCCESS: Image.gz-dtb"
-            ls -la out/arch/arm64/boot/Image.gz-dtb
-          elif [ -f out/arch/arm64/boot/Image ]; then
+          export PATH="$GITHUB_WORKSPACE/bin:$GITHUB_WORKSPACE/gcc49/bin:$PATH"
+          make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" python=python2 -j"$(nproc)" Image
+          if [ -f out/arch/arm64/boot/Image ]; then
             echo "[+] Build SUCCESS: Image"
             ls -la out/arch/arm64/boot/Image
           else
             echo "[-] Build FAILED: no kernel image found"
-            find out/arch/arm64/boot/ -type f 2>/dev/null
+            find out/arch/arm64/boot/ -type f 2>/dev/null || true
             exit 1
           fi
 
@@ -205,26 +197,30 @@ jobs:
               echo "Packaged: $img ($(stat -c%s "$img") bytes)"
             fi
           done
-          # Also grab DTB if present
           find . -name '*.dtb' -exec cp {} "$GITHUB_WORKSPACE/output/" \; 2>/dev/null || true
+          # stamp
+          echo "ReSukiSU_REF=$RESUKISU_REF" > "$GITHUB_WORKSPACE/output/build-info.txt"
+          (cd "$GITHUB_WORKSPACE/kernel/KernelSU" && git rev-parse HEAD && git describe --tags --always) >> "$GITHUB_WORKSPACE/output/build-info.txt" || true
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DRA-RKSU-kernel-${{ env.RKSU_TAG }}
+          name: DRA-ReSukiSU-kernel-${{ env.RESUKISU_REF }}
           path: output/
 
       - name: Create Release
         if: success()
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: rksu-${{ env.RKSU_TAG }}-${{ github.run_number }}
-          name: "DRA-AL00 RKSU ${{ env.RKSU_TAG }} Build #${{ github.run_number }}"
+          tag_name: resukisu-${{ github.run_number }}
+          name: "DRA-AL00 ReSukiSU Build #${{ github.run_number }}"
           body: |
-            DRA-AL00 (MT6739) kernel 4.4.95 with RKSU ${{ env.RKSU_TAG }}
-            - Manual hook mode (no kprobes)
-            - KALLSYMS_ALL enabled
-            - HW_ROOT_SCAN disabled
-            - NAMESPACES enabled
-            - OVERLAY_FS enabled
+            DRA-AL00 (MT6739) kernel 4.4.95 with ReSukiSU
+            - Source: ReSukiSU/ReSukiSU @ ${{ env.RESUKISU_REF }}
+            - Manual hook mode (no kprobes / no GKI tracepoints)
+            - stock-align: HZ=300 FINAL_RELEASE=y
+            - MULTI_MANAGER_SUPPORT if available
+            - HW_ROOT_SCAN disabled, NAMESPACES + OVERLAY_FS enabled
+
+            Use your ReSukiSU Manager APK with this kernel.
           files: output/*
