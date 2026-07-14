@@ -42,13 +42,17 @@ jobs:
 
       - name: Fix DrvGen.py Python 2->3 compatibility
         run: |
-          cd kernel/tools/dct
-          # Fix print """ -> print("""
-          sed -i 's/print """/print("""/g' DrvGen.py
-          # Fix except Exception, e:
-          sed -i 's/except Exception, e:/except Exception as e:/g' DrvGen.py
-          # Fix closing triple-quote - add ) before the blank line after """
-          sed -i '/"""$/N;s/"""\n\n/""")\n\n/' DrvGen.py
+          python3 -c "
+import re
+with open('kernel/tools/dct/DrvGen.py') as f:
+    c = f.read()
+c = c.replace('print """', 'print("""')
+c = re.sub(r'"""\n(?=\n)', '"""\n)\n', c)
+c = c.replace('except Exception, e:', 'except Exception as e:')
+with open('kernel/tools/dct/DrvGen.py', 'w') as f:
+    f.write(c)
+print('[+] Fixed DrvGen.py')
+"
       - name: Download GCC 4.9 toolchain
         run: |
           # LineageOS GCC 4.9 aarch64
