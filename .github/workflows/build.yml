@@ -16,7 +16,7 @@ jobs:
 
     env:
       KERNEL_REPO: https://github.com/paperluigis/android-huawei-dura-kernel
-      KERNEL_BRANCH: master
+      KERNEL_BRANCH: og
       DEFCONFIG: dura64_defconfig
       BOARD_DEFCONFIG: dura64_board_AL00A_defconfig
       ARCH: arm64
@@ -42,6 +42,7 @@ jobs:
 
       - name: Download GCC 4.9 toolchain
         run: |
+          # LineageOS GCC 4.9 aarch64
           git clone --depth=1 https://github.com/nickyzhang/prebuilts_gcc-linux-x86_aarch64-aarch64-linux-android-4.9 gcc49
           export PATH="$GITHUB_WORKSPACE/gcc49/bin:$PATH"
           aarch64-linux-android-gcc --version | head -1
@@ -49,11 +50,19 @@ jobs:
       - name: Integrate RKSU
         run: |
           cd kernel
+          # Clone RKSU
           git clone --depth=1 -b main $RKSU_REPO KernelSU
           cd KernelSU && git fetch --tags && git checkout $RKSU_TAG && cd ..
+
+          # Symlink into drivers/
           ln -sf "$(realpath KernelSU/kernel)" drivers/kernelsu
+
+          # Patch drivers/Makefile
           echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
+
+          # Patch drivers/Kconfig
           sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+
           echo "[+] RKSU integrated at $RKSU_TAG"
 
       - name: Apply manual hooks patch
@@ -61,13 +70,17 @@ jobs:
           cd kernel
           bash "$GITHUB_WORKSPACE/patch_dra_hooks.sh"
 
-      - name: Fix host tool compatibility
+      - name: Fix host tool compatibility (GCC 11 vs 4.4 kernel)
         run: |
           cd kernel
+
+          # Fix dtc yylloc multiple definition (GCC 10+ -fno-common)
           if grep -rq 'YYLTYPE yylloc' scripts/dtc/dtc-lexer.l 2>/dev/null; then
             sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' scripts/dtc/dtc-lexer.l
             sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' scripts/dtc/dtc-lexer.lex.c 2>/dev/null || true
           fi
+
+          # Fix any other yylloc in generated files
           find scripts/dtc -name '*.c' -exec sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' {} + 2>/dev/null || true
 
       - name: Configure kernel
@@ -75,11 +88,17 @@ jobs:
           cd kernel
           export ARCH=arm64
           export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
+
+          # Generate base config
           make O=out $DEFCONFIG
+
+          # Merge board config
           if [ -f "arch/arm64/configs/$BOARD_DEFCONFIG" ]; then
             scripts/kconfig/merge_config.sh -m -O out out/.config "arch/arm64/configs/$BOARD_DEFCONFIG" 2>/dev/null || \
             cat "arch/arm64/configs/$BOARD_DEFCONFIG" >> out/.config
           fi
+
+          # Enable RKSU
           scripts/config --file out/.config \
             --enable KSU \
             --enable KSU_MANUAL_HOOK \
@@ -95,7 +114,9 @@ jobs:
             --enable NET_NS \
             --disable HW_ROOT_SCAN \
             --enable OVERLAY_FS
+
           make O=out ARCH=arm64 olddefconfig
+
           echo "=== Config check ==="
           for cfg in KSU KSU_MANUAL_HOOK KPROBES KALLSYMS_ALL NAMESPACES HW_ROOT_SCAN OVERLAY_FS; do
             grep "CONFIG_${cfg}" out/.config || echo "CONFIG_${cfg} not found"
@@ -108,11 +129,14 @@ jobs:
           export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
           export HOSTCFLAGS="-fcommon -Wno-error"
           export HOSTLDFLAGS=""
+
           make O=out \
             ARCH=arm64 \
             CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-" \
             HOSTCFLAGS="-fcommon -Wno-error" \
             -j$(nproc) 2>&1 | tail -100
+
+          # Check output
           if [ -f out/arch/arm64/boot/Image.gz ]; then
             echo "[+] Build SUCCESS: Image.gz"
             ls -la out/arch/arm64/boot/Image.gz
@@ -138,6 +162,7 @@ jobs:
               echo "Packaged: $img ($(stat -c%s "$img") bytes)"
             fi
           done
+          # Also grab DTB if present
           find . -name '*.dtb' -exec cp {} "$GITHUB_WORKSPACE/output/" \; 2>/dev/null || true
 
       - name: Upload artifact
