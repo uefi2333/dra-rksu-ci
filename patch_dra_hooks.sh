@@ -1,51 +1,111 @@
 #!/bin/bash
-# patch_dra_hooks.sh — ReSukiSU manual hooks for DRA-AL00 (Linux 4.4.95, MT6739)
+# patch_dra_hooks.sh — ReSukiSU full manual integrate for DRA-AL00 (Linux 4.4.95)
 # Docs: https://resukisu.github.io/guide/manual-integrate.md
-# Missing any required hook can fail ReSukiSU compile-time checks.
-set -e
-echo "[+] Patching DRA 4.4.95 for ReSukiSU manual hooks..."
+set -euo pipefail
+echo "[+] Patching DRA 4.4.95 for ReSukiSU (hooks + static exports)..."
 
-# ---------- 1) faccessat (4.19- style: inside SYSCALL body) ----------
-echo "[1/5] fs/open.c faccessat"
+# ============================================================================
+# 0) Static symbol exports (required if !CONFIG_KALLSYMS_ALL)
+#    check file paths come from kernel/tools/static_export_check.mk
+# ============================================================================
+echo "[0] SELinux static symbol exports"
+
+unstatic() {
+  # $1=file $2=regex_static_line_prefix_to_strip (python)
+  local f="$1"
+  local pattern="$2"
+  local label="$3"
+  if [ ! -f "$f" ]; then
+    echo "    [!] missing $f ($label) — skip"
+    return 0
+  fi
+  python3 - "$f" "$pattern" "$label" <<'PY'
+import re, sys
+from pathlib import Path
+path, pattern, label = sys.argv[1], sys.argv[2], sys.argv[3]
+t = Path(path).read_text()
+# pattern is the FULL static form that check greps for; remove leading static
+# We accept flexible whitespace
+orig = t
+# common forms
+repls = [
+    (r'^static ssize_t \(\*write_op\[\]\)', r'ssize_t (*write_op[])'),
+    (r'^static const struct file_operations sel_handle_status_ops', r'const struct file_operations sel_handle_status_ops'),
+    (r'^static struct page \*selinux_status_page\s*;', r'struct page *selinux_status_page;'),
+    (r'^static DEFINE_MUTEX\(selinux_status_lock\);', r'DEFINE_MUTEX(selinux_status_lock);'),
+    (r'^static DEFINE_MUTEX\(sel_mutex\);', r'DEFINE_MUTEX(sel_mutex);'),
+    (r'^static DEFINE_RWLOCK\(policy_rwlock\);', r'DEFINE_RWLOCK(policy_rwlock);'),
+    (r'^static struct security_operations selinux_ops', r'struct security_operations selinux_ops'),
+    (r'^static void security_dump_masked_av\b', r'void security_dump_masked_av'),
+    (r'^static void context_struct_compute_av\b', r'void context_struct_compute_av'),
+]
+changed = 0
+for a,b in repls:
+    nt, n = re.subn(a, b, t, flags=re.M)
+    if n:
+        t = nt
+        changed += n
+if t != orig:
+    Path(path).write_text(t)
+    print(f"    [+] unstatic in {path} ({changed} rules, {label})")
+else:
+    # show whether already non-static
+    print(f"    [=] no static match in {path} ({label}) — maybe already exported or different layout")
+PY
+}
+
+# paths from static_export_check.mk
+unstatic security/selinux/selinuxfs.c "write_op" "write_op/sel_handle_status_ops/sel_mutex"
+unstatic security/selinux/ss/status.c "status_page" "selinux_status_page/lock"
+unstatic security/selinux/ss/services.c "policy_rwlock" "policy_rwlock (+legacy status_page if here)"
+unstatic security/selinux/hooks.c "selinux_ops" "selinux_ops (<4.2)"
+
+# belt: also try services.c for status symbols if status.c absent/old trees
+if [ -f security/selinux/ss/services.c ]; then
+  sed -i 's/^static struct page \*selinux_status_page;/struct page *selinux_status_page;/' security/selinux/ss/services.c || true
+  sed -i 's/^static DEFINE_MUTEX(selinux_status_lock);/DEFINE_MUTEX(selinux_status_lock);/' security/selinux/ss/services.c || true
+fi
+
+# ============================================================================
+# 1) faccessat — 4.19- style
+# ============================================================================
+echo "[1] fs/open.c faccessat"
 python3 - <<'PY'
 from pathlib import Path
+import re
 p = Path("fs/open.c")
 t = p.read_text()
 if "ksu_handle_faccessat" in t:
     print("    already patched")
 else:
-    lines = t.splitlines(keepends=True)
-    out = []
-    inserted_decl = False
-    inserted_call = False
-    in_fa = False
-    for i, line in enumerate(lines):
-        # decl just before faccessat syscall
-        if (not inserted_decl) and line.startswith("SYSCALL_DEFINE3(faccessat,"):
-            out.append("#ifdef CONFIG_KSU_MANUAL_HOOK\n")
-            out.append("__attribute__((hot))\n")
-            out.append("extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,\n")
-            out.append("\t\t\t\tint *mode, int *flags);\n")
-            out.append("#endif\n")
-            out.append("\n")
-            inserted_decl = True
-            in_fa = True
-        out.append(line)
-        if in_fa and (not inserted_call) and "unsigned int lookup_flags = LOOKUP_FOLLOW;" in line:
-            out.append("\n")
-            out.append("#ifdef CONFIG_KSU_MANUAL_HOOK\n")
-            out.append("\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n")
-            out.append("#endif\n")
-            inserted_call = True
-            in_fa = False
-    if not inserted_decl or not inserted_call:
-        raise SystemExit(f"faccessat patch failed decl={inserted_decl} call={inserted_call}")
-    p.write_text("".join(out))
-    print("    [+] faccessat")
+    m = re.search(r"^SYSCALL_DEFINE3\(faccessat,", t, re.M)
+    if not m:
+        raise SystemExit("faccessat syscall not found")
+    decl = (
+        "#ifdef CONFIG_KSU_MANUAL_HOOK\n"
+        "__attribute__((hot))\n"
+        "extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,\n"
+        "\t\t\t\tint *mode, int *flags);\n"
+        "#endif\n\n"
+    )
+    t = t[:m.start()] + decl + t[m.start():]
+    m = re.search(r"^SYSCALL_DEFINE3\(faccessat,", t, re.M)
+    brace = t.find("{", m.end())
+    # insert after opening brace
+    hook = (
+        "\n#ifdef CONFIG_KSU_MANUAL_HOOK\n"
+        "\tksu_handle_faccessat(&dfd, &filename, &mode, NULL);\n"
+        "#endif"
+    )
+    t = t[:brace+1] + hook + t[brace+1:]
+    p.write_text(t)
+    print("    [+] faccessat at syscall brace")
 PY
 
-# ---------- 2) execve (3.14+: do_execve / compat_do_execve) ----------
-echo "[2/5] fs/exec.c execve"
+# ============================================================================
+# 2) execve (3.14+)
+# ============================================================================
+echo "[2] fs/exec.c execve"
 python3 - <<'PY'
 from pathlib import Path
 import re
@@ -54,11 +114,7 @@ t = p.read_text()
 if "ksu_handle_execveat" in t:
     print("    already patched")
 else:
-    # insert decl before first do_execve definition that is not do_execveat
-    m = re.search(r"^int do_execve\(struct filename \*filename,", t, re.M)
-    if not m:
-        # some trees use different prototype
-        m = re.search(r"^int do_execve\(", t, re.M)
+    m = re.search(r"^int do_execve\s*\(", t, re.M)
     if not m:
         raise SystemExit("do_execve not found")
     decl = (
@@ -70,22 +126,17 @@ else:
     )
     t = t[:m.start()] + decl + t[m.start():]
 
-    # hook in do_execve body: before return do_execveat_common(...)
-    def inject_before_return(src, func_name):
-        # find function start
-        pat = re.compile(rf"^{re.escape(func_name)}\s*\(", re.M)
-        mm = pat.search(src)
+    def inject(src, sig):
+        mm = re.search(rf"^{re.escape(sig)}\s*\(", src, re.M)
+        if not mm:
+            # try without return type exact
+            mm = re.search(rf"{re.escape(sig)}\s*\(", src, re.M)
         if not mm:
             return src, False
-        # find body start
         brace = src.find("{", mm.end())
-        if brace < 0:
-            return src, False
-        # find matching close roughly by searching first return do_execveat_common
         sub = src[brace:]
         rr = re.search(r"\n(\s*)return do_execveat_common\(", sub)
         if not rr:
-            # maybe do_execve_common
             rr = re.search(r"\n(\s*)return do_execve_common\(", sub)
         if not rr:
             return src, False
@@ -98,61 +149,75 @@ else:
         pos = brace + rr.start()
         return src[:pos] + hook + src[pos:], True
 
-    t, ok1 = inject_before_return(t, "int do_execve")
-    t, ok2 = inject_before_return(t, "static int compat_do_execve")
+    t, ok1 = inject(t, "int do_execve")
+    t, ok2 = inject(t, "static int compat_do_execve")
     if not ok2:
-        t, ok2 = inject_before_return(t, "int compat_do_execve")
-    p.write_text(t)
-    print(f"    [+] execve do_execve={ok1} compat={ok2}")
+        t, ok2 = inject(t, "int compat_do_execve")
     if not ok1:
         raise SystemExit("do_execve hook failed")
+    p.write_text(t)
+    print(f"    [+] execve do_execve={ok1} compat={ok2}")
 PY
 
-# ---------- 3) stat / newfstatat / newfstat ret ----------
-echo "[3/5] fs/stat.c stat"
+# ============================================================================
+# 3) stat / newfstat ret
+# ============================================================================
+echo "[3] fs/stat.c stat"
 python3 - <<'PY'
 from pathlib import Path
+import re
 p = Path("fs/stat.c")
 t = p.read_text()
-if "ksu_handle_stat" in t:
+if "ksu_handle_stat" in t and "ksu_handle_newfstat_ret" in t:
     print("    already patched")
 else:
-    lines = t.splitlines(keepends=True)
-    out = []
-    inserted_decl = False
-    # insert decl once before first newfstatat
-    for line in lines:
-        if (not inserted_decl) and line.startswith("SYSCALL_DEFINE4(newfstatat,"):
-            out.append("#ifdef CONFIG_KSU_MANUAL_HOOK\n")
-            out.append("__attribute__((hot))\n")
-            out.append("extern int ksu_handle_stat(int *dfd, const char __user **filename_user,\n")
-            out.append("\t\t\t\tint *flags);\n")
-            out.append("extern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);\n")
-            out.append("#if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)\n")
-            out.append("extern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr);\n")
-            out.append("#endif\n")
-            out.append("#endif\n")
-            out.append("\n")
-            inserted_decl = True
-        out.append(line)
-    t = "".join(out)
+    # strip partial
+    for s in ["ksu_handle_stat", "ksu_handle_newfstat_ret", "ksu_handle_fstat64_ret"]:
+        pass
+    m = re.search(r"^SYSCALL_DEFINE4\(newfstatat,", t, re.M)
+    if not m:
+        raise SystemExit("newfstatat not found")
+    decl = (
+        "#ifdef CONFIG_KSU_MANUAL_HOOK\n"
+        "__attribute__((hot))\n"
+        "extern int ksu_handle_stat(int *dfd, const char __user **filename_user,\n"
+        "\t\t\t\tint *flags);\n"
+        "extern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);\n"
+        "#if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)\n"
+        "extern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr);\n"
+        "#endif\n"
+        "#endif\n\n"
+    )
+    if "ksu_handle_stat" not in t:
+        t = t[:m.start()] + decl + t[m.start():]
 
-    # inject ksu_handle_stat after "int error;" in newfstatat and fstatat64
-    def inject_stat_call(src, define_prefix):
-        idx = 0
+    def inject_after_int_error(src, define):
+        i = 0
         count = 0
         while True:
-            i = src.find(define_prefix, idx)
-            if i < 0:
+            pos = src.find(define, i)
+            if pos < 0:
                 break
-            # find "int error;" after this define within ~400 chars of body
-            brace = src.find("{", i)
+            brace = src.find("{", pos)
             if brace < 0:
                 break
-            window = src[brace:brace+500]
+            # only first ~40 lines of body
+            window_end = min(len(src), brace + 600)
+            window = src[brace:window_end]
+            if "ksu_handle_stat(&dfd" in window:
+                i = window_end
+                continue
             j = window.find("int error;")
             if j < 0:
-                idx = i + len(define_prefix)
+                # try insert right after brace
+                hook = (
+                    "\n#ifdef CONFIG_KSU_MANUAL_HOOK\n"
+                    "\tksu_handle_stat(&dfd, &filename, &flag);\n"
+                    "#endif"
+                )
+                src = src[:brace+1] + hook + src[brace+1:]
+                count += 1
+                i = brace + len(hook) + 1
                 continue
             absj = brace + j + len("int error;")
             hook = (
@@ -160,54 +225,52 @@ else:
                 "\tksu_handle_stat(&dfd, &filename, &flag);\n"
                 "#endif\n"
             )
-            # avoid double
-            if "ksu_handle_stat(&dfd" in src[brace:brace+600]:
-                idx = absj
-                continue
             src = src[:absj] + hook + src[absj:]
             count += 1
-            idx = absj + len(hook)
+            i = absj + len(hook)
         return src, count
 
-    t, c1 = inject_stat_call(t, "SYSCALL_DEFINE4(newfstatat,")
-    t, c2 = inject_stat_call(t, "SYSCALL_DEFINE4(fstatat64,")
+    t, c1 = inject_after_int_error(t, "SYSCALL_DEFINE4(newfstatat,")
+    t, c2 = inject_after_int_error(t, "SYSCALL_DEFINE4(fstatat64,")
 
-    # newfstat ret: before return error; at end of newfstat
-    def inject_ret(src, define_line, call):
-        i = src.find(define_line)
-        if i < 0:
+    def inject_ret(src, define, call):
+        pos = src.find(define)
+        if pos < 0:
             return src, False
-        brace = src.find("{", i)
-        # find last "return error;" in this function: naive until next SYSCALL or end roughly 800 chars
+        brace = src.find("{", pos)
+        # end at next SYSCALL_DEFINE or EOF window
         end = src.find("\nSYSCALL_", brace + 1)
         if end < 0:
-            end = brace + 800
+            end = min(len(src), brace + 900)
         body = src[brace:end]
-        k = body.rfind("return error;")
-        if k < 0:
-            return src, False
-        abspos = brace + k
         if call.split("(")[0] in body:
             return src, True
+        k = body.rfind("return error;")
+        if k < 0:
+            # try before final return
+            k = body.rfind("return ")
+            if k < 0:
+                return src, False
+        abspos = brace + k
         hook = (
             "#ifdef CONFIG_KSU_MANUAL_HOOK\n"
             f"\t{call}\n"
             "#endif\n\t"
         )
-        src = src[:abspos] + hook + src[abspos:]
-        return src, True
+        return src[:abspos] + hook + src[abspos:], True
 
     t, r1 = inject_ret(t, "SYSCALL_DEFINE2(newfstat,", "ksu_handle_newfstat_ret(&fd, &statbuf);")
     t, r2 = inject_ret(t, "SYSCALL_DEFINE2(fstat64,", "ksu_handle_fstat64_ret(&fd, &statbuf);")
-
     p.write_text(t)
     print(f"    [+] newfstatat={c1} fstatat64={c2} newfstat_ret={r1} fstat64_ret={r2}")
-    if c1 < 1:
-        raise SystemExit("newfstatat hook missing")
+    if c1 < 1 or not r1:
+        raise SystemExit("stat hooks incomplete")
 PY
 
-# ---------- 4) sys_reboot ----------
-echo "[4/5] kernel/reboot.c sys_reboot"
+# ============================================================================
+# 4) sys_reboot — MUST be inside SYSCALL_DEFINE4(reboot), never run_cmd
+# ============================================================================
+echo "[4] kernel/reboot.c sys_reboot"
 python3 - <<'PY'
 from pathlib import Path
 import re
@@ -215,7 +278,7 @@ p = Path("kernel/reboot.c")
 if not p.exists():
     p = Path("kernel/sys.c")
 t = p.read_text()
-# strip any previous bad injection first
+# strip any previous injections
 t = re.sub(
     r"\n#ifdef CONFIG_KSU_MANUAL_HOOK\n"
     r"extern int ksu_handle_sys_reboot\(int magic1, int magic2, unsigned int cmd, void __user \*\*arg\);\n"
@@ -226,69 +289,121 @@ t = re.sub(
 t = re.sub(
     r"\n#ifdef CONFIG_KSU_MANUAL_HOOK\n"
     r"\tksu_handle_sys_reboot\(magic1, magic2, cmd, &arg\);\n"
-    r"#endif\n",
+    r"#endif\n?",
     "\n",
     t,
 )
-if "ksu_handle_sys_reboot" in t:
-    print("    still has leftover reboot hook, abort")
-    raise SystemExit(1)
-
-# find SYSCALL_DEFINE4(reboot,
 m = re.search(r"^SYSCALL_DEFINE4\(reboot,", t, re.M)
 if not m:
     raise SystemExit("SYSCALL_DEFINE4(reboot not found")
-# insert decl just before the define
 decl = (
     "#ifdef CONFIG_KSU_MANUAL_HOOK\n"
     "extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n"
     "#endif\n\n"
 )
-t = t[: m.start()] + decl + t[m.start() :]
-# re-find after insert
+t = t[:m.start()] + decl + t[m.start():]
 m = re.search(r"^SYSCALL_DEFINE4\(reboot,", t, re.M)
 brace = t.find("{", m.end())
-if brace < 0:
-    raise SystemExit("reboot syscall brace not found")
 hook = (
     "\n#ifdef CONFIG_KSU_MANUAL_HOOK\n"
     "\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n"
     "#endif"
 )
-t = t[: brace + 1] + hook + t[brace + 1 :]
-p.write_text(t)
-print(f"    [+] reboot hook in {p} at brace {brace}")
-# sanity: must appear inside SYSCALL_DEFINE4(reboot body, not in run_cmd
-idx = t.find("ksu_handle_sys_reboot(magic1")
-run_cmd = t.find("run_cmd(")
+t = t[:brace+1] + hook + t[brace+1:]
+# verify position: call must be after reboot define and before next SYSCALL_/run_cmd if any after
+call = t.find("ksu_handle_sys_reboot(magic1")
 syscall = t.find("SYSCALL_DEFINE4(reboot,")
-if idx < 0 or (run_cmd > 0 and run_cmd < idx and syscall > run_cmd):
-    # ok if syscall before call; fail if call is after run_cmd definition that is before syscall? 
-    pass
-# ensure the call is after the reboot define
-if idx < syscall:
-    raise SystemExit("hook before syscall define")
-# if run_cmd exists between syscall and hook, fail
-if run_cmd > syscall and run_cmd < idx:
-    raise SystemExit("hook landed after run_cmd — wrong function")
-print("    [+] reboot hook position OK")
+run_cmd = t.find("\nstatic int run_cmd(")
+if run_cmd < 0:
+    run_cmd = t.find("\nint run_cmd(")
+if call < syscall:
+    raise SystemExit("reboot hook before define")
+# if run_cmd is between syscall and call → bad
+if run_cmd > syscall and run_cmd < call:
+    raise SystemExit("reboot hook landed in/after run_cmd — abort")
+# ensure next function after call is not wrong: call should be within ~400 chars of brace
+if call - brace > 500:
+    raise SystemExit(f"reboot hook too far from brace: {call-brace}")
+p.write_text(t)
+print(f"    [+] reboot hook OK in {p} (brace dist {call-brace})")
 PY
 
-# ---------- 5) 4.4 compat: groups_sort unstatic + SELinux statics ----------
-echo "[5/5] 4.4 compat symbols"
+# ============================================================================
+# 5) 4.4 compat: groups_sort
+# ============================================================================
+echo "[5] groups_sort unstatic"
 if grep -q '^static void groups_sort' kernel/groups.c 2>/dev/null; then
   sed -i 's/^static void groups_sort/void groups_sort/' kernel/groups.c
-  echo "    [+] groups_sort unstatic"
+  echo "    [+] groups_sort"
 else
-  echo "    [!] groups_sort pattern not found (ok if already public)"
+  echo "    [=] groups_sort already public or different"
 fi
 
-# SELinux static symbol exports (often needed by KSU sepolicy)
-sed -i 's/^static ssize_t (\*write_op\[\])/ssize_t (*write_op[])/' security/selinux/selinuxfs.c 2>/dev/null || true
-sed -i 's/^static const struct file_operations sel_handle_status_ops/const struct file_operations sel_handle_status_ops/' security/selinux/selinuxfs.c 2>/dev/null || true
-sed -i 's/^static DEFINE_MUTEX(sel_mutex);/DEFINE_MUTEX(sel_mutex);/' security/selinux/selinuxfs.c 2>/dev/null || true
-sed -i 's/^static DEFINE_RWLOCK(policy_rwlock);/DEFINE_RWLOCK(policy_rwlock);/' security/selinux/ss/services.c 2>/dev/null || true
-sed -i 's/^static struct page \*selinux_status_page;/struct page *selinux_status_page;/' security/selinux/ss/services.c 2>/dev/null || true
-sed -i 's/^static DEFINE_MUTEX(selinux_status_lock);/DEFINE_MUTEX(selinux_status_lock);/' security/selinux/ss/services.c 2>/dev/null || true
+# ============================================================================
+# 6) VERIFY against ReSukiSU compile-time checks
+# ============================================================================
+echo "[6] verify against ReSukiSU check patterns"
+python3 - <<'PY'
+from pathlib import Path
+import re, sys
+fails = []
 
-echo "[+] ReSukiSU manual hooks applied"
+def must_contain(path, needle, why):
+    t = Path(path).read_text() if Path(path).exists() else ""
+    if needle not in t:
+        fails.append(f"MISSING {needle} in {path} ({why})")
+    else:
+        print(f"    OK hook {needle} @ {path}")
+
+def must_not_contain(path, needle, why):
+    if not Path(path).exists():
+        print(f"    skip missing {path}")
+        return
+    t = Path(path).read_text()
+    if needle in t:
+        # allow in comments? no
+        fails.append(f"STILL STATIC: {needle!r} in {path} ({why})")
+    else:
+        print(f"    OK export cleared {needle!r} @ {path}")
+
+# hooks required by manual_hook_check.mk (with AUTO_* default y)
+must_contain("fs/exec.c", "ksu_handle_execveat", "execve")
+must_contain("fs/open.c", "ksu_handle_faccessat", "faccessat")
+must_contain("fs/stat.c", "ksu_handle_stat", "stat")
+must_contain("fs/stat.c", "ksu_handle_newfstat_ret", "newfstat ret")
+must_contain("fs/stat.c", "ksu_handle_fstat64_ret", "fstat64 ret")
+must_contain("kernel/reboot.c", "ksu_handle_sys_reboot", "reboot")
+
+# static_export_check.mk patterns (must NOT remain)
+must_not_contain("security/selinux/selinuxfs.c", "static ssize_t (*write_op[])", "write_op")
+must_not_contain("security/selinux/selinuxfs.c", "static const struct file_operations sel_handle_status_ops", "sel_handle_status_ops")
+# status.c is what the makefile checks for 4.4 without selinux_state
+if Path("security/selinux/ss/status.c").exists():
+    must_not_contain("security/selinux/ss/status.c", "static struct page *selinux_status_page", "status_page")
+    must_not_contain("security/selinux/ss/status.c", "static DEFINE_MUTEX(selinux_status_lock)", "status_lock")
+must_not_contain("security/selinux/selinuxfs.c", "static DEFINE_MUTEX(sel_mutex)", "sel_mutex")
+must_not_contain("security/selinux/ss/services.c", "static DEFINE_RWLOCK(policy_rwlock)", "policy_rwlock")
+
+# reboot not in run_cmd
+rb = Path("kernel/reboot.c").read_text()
+# crude: extract function containing the call
+idx = rb.find("ksu_handle_sys_reboot(magic1")
+before = rb[max(0, idx-800):idx]
+if "run_cmd" in before.split("SYSCALL_DEFINE4(reboot")[-1] if "SYSCALL_DEFINE4(reboot" in before else before:
+    # if between last SYSCALL reboot and call there is run_cmd — bad already checked
+    pass
+if re.search(r"run_cmd[\s\S]{0,400}ksu_handle_sys_reboot", rb):
+    # only fail if run_cmd appears immediately before call without SYSCALL reboot in between
+    m = re.search(r"(run_cmd|SYSCALL_DEFINE4\(reboot,)[\s\S]{0,500}?ksu_handle_sys_reboot", rb)
+    if m and m.group(1).startswith("run_cmd"):
+        fails.append("reboot hook still near run_cmd")
+
+if fails:
+    print("VERIFY FAILED:")
+    for f in fails:
+        print(" -", f)
+    sys.exit(1)
+print("[+] all verify checks passed")
+PY
+
+echo "[+] ReSukiSU manual integrate complete"
