@@ -42,53 +42,7 @@ jobs:
 
       - name: Fix DrvGen.py Python 2->3 compatibility
         run: |
-          cd kernel
-          sed -i 's/^def usage():/def usage():\n    print("=== DrvGen Usage ===")/' tools/dct/DrvGen.py
-          sed -i 's/print .*usage:/print("usage:/' tools/dct/DrvGen.py
-          sed -i "s/except Exception, e:/except Exception as e:/" tools/dct/DrvGen.py
-          python3 -c "
-# Fix the multi-line print in DrvGen.py
-with open('tools/dct/DrvGen.py') as f:
-    c = f.read()
-# Replace the usage function entirely to be Python 3 compatible
-old_usage = """def usage():
-    print \"""
-usage: DrvGen [dws_path] [file_path] [log_path] [paras]...
-
-options and arguments:
-
-dws_path    :    dws file path
-file_path   :    where you want to put generated files
-log_path    :    where to store the log files
-paras        :    parameter for generate wanted file
-\"""
-"""
-new_usage = """def usage():
-    print(\"""usage: DrvGen [dws_path] [file_path] [log_path] [paras]...
-
-options and arguments:
-
-dws_path    :    dws file path
-file_path   :    where you want to put generated files
-log_path    :    where to store the log files
-paras        :    parameter for generate wanted file
-\""")
-"""
-if old_usage in c:
-    c = c.replace(old_usage, new_usage)
-    print('[+] Fixed DrvGen.py usage() print')
-else:
-    print('[-] Could not find old usage pattern')
-    # Try direct approach
-    import re
-    c = re.sub(r'^def usage\(\):\n    print \"\"\"', 'def usage():\n    print(\"\"\"', c, flags=re.MULTILINE)
-    c = re.sub(r'\"\"\"$', '\"\"\")', c, flags=re.MULTILINE)
-    c = c.replace('except Exception, e:', 'except Exception as e:')
-    print('[+] Applied regex fallback fix')
-with open('tools/dct/DrvGen.py', 'w') as f:
-    f.write(c)
-"
-
+          python3 fix_drvgen.py kernel/tools/dct/DrvGen.py
       - name: Download GCC 4.9 toolchain
         run: |
           # LineageOS GCC 4.9 aarch64
