@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       resukisu_ref:
-        description: 'ReSukiSU tag/branch (main recommended for latest manager)'
+        description: 'ReSukiSU tag/branch (main recommended)'
         required: false
         default: 'main'
 
@@ -38,7 +38,7 @@ jobs:
         run: |
           git clone --depth=1 -b $KERNEL_BRANCH $KERNEL_REPO kernel
           cd kernel
-          echo "Kernel version: $(head -5 Makefile | grep -E 'VERSION|PATCHLEVEL|SUBLEVEL' | tr '\n' ' ')"
+          echo "Kernel: $(head -5 Makefile | tr '\n' ' ')"
 
       - name: Download GCC 4.9 toolchain
         run: |
@@ -51,65 +51,45 @@ jobs:
           cd kernel
           git clone --depth=1 $RESUKISU_REPO KernelSU
           cd KernelSU
-          git fetch --depth=1 origin $RESUKISU_REF || true
-          git checkout $RESUKISU_REF || git checkout FETCH_HEAD || true
-          echo "ReSukiSU ref: $(git rev-parse --short HEAD) $(git describe --tags --always 2>/dev/null || true)"
+          git fetch --depth=1 origin "$RESUKISU_REF" || true
+          git checkout "$RESUKISU_REF" || git checkout FETCH_HEAD || true
+          echo "ReSukiSU: $(git rev-parse --short HEAD) $(git describe --tags --always 2>/dev/null || true)"
           cd ..
 
-          # Symlink drivers/kernelsu -> KernelSU/kernel
           ln -sfn "$(realpath KernelSU/kernel)" drivers/kernelsu
-
-          # Makefile
-          if ! grep -q 'kernelsu/' drivers/Makefile; then
-            echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
-          fi
-
-          # Kconfig source
+          grep -q 'kernelsu/' drivers/Makefile || echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
           if ! grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig; then
             sed -i '/endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
           fi
-
-          # sanity
           test -f drivers/kernelsu/Kconfig
-          ls -la drivers/kernelsu | head
+          test -f drivers/kernelsu/tools/static_export_check.mk
           echo "[+] ReSukiSU integrated"
 
-      - name: Apply manual hooks patch
+      - name: Apply manual hooks + static exports
         run: |
           cd kernel
           bash "$GITHUB_WORKSPACE/patch_dra_hooks.sh"
 
-      - name: Suppress C90 declaration-after-statement error in kernel Makefile
+      - name: Host/kernel build fixes (yylloc, C90, HOSTCFLAGS)
         run: |
           cd kernel
+          # C90: ReSukiSU sources use decl-after-statement
           sed -i 's/-Wdeclaration-after-statement/-Wno-declaration-after-statement/g' Makefile
-          grep -n "declaration-after-statement" Makefile || true
-          echo "[+] Disabled -Wdeclaration-after-statement"
 
-      - name: Fix host tool compatibility (GCC 11 vs 4.4 kernel)
-        run: |
-          cd kernel
-          # modern host GCC defaults to -fno-common → yylloc multi-def in dtc
-          # Fix both source and SHIPPED pregenerated files; force -fcommon as backup.
-          for f in scripts/dtc/dtc-lexer.l scripts/dtc/dtc-lexer.lex.c                    scripts/dtc/dtc-parser.y scripts/dtc/dtc-parser.tab.c; do
+          # dtc yylloc multi-def under modern host GCC (-fno-common)
+          for f in scripts/dtc/dtc-lexer.l scripts/dtc/dtc-lexer.lex.c \
+                   scripts/dtc/dtc-parser.y scripts/dtc/dtc-parser.tab.c; do
             [ -f "$f" ] || continue
             sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' "$f" || true
-            sed -i 's/^YYLTYPE yylloc =/extern YYLTYPE yylloc;\/\/ was /' "$f" || true
           done
-          # ensure only one definition remains: put definition in parser tab if both became extern
-          if ! grep -q '^YYLTYPE yylloc' scripts/dtc/dtc-parser.tab.c 2>/dev/null; then
-            if grep -q 'extern YYLTYPE yylloc' scripts/dtc/dtc-parser.tab.c 2>/dev/null; then
-              sed -i '0,/extern YYLTYPE yylloc;/s//YYLTYPE yylloc;/' scripts/dtc/dtc-parser.tab.c || true
-            fi
+          # keep one definition in parser
+          if grep -q 'extern YYLTYPE yylloc' scripts/dtc/dtc-parser.tab.c 2>/dev/null; then
+            sed -i '0,/extern YYLTYPE yylloc;/s//YYLTYPE yylloc;/' scripts/dtc/dtc-parser.tab.c || true
           fi
-          # HOSTCFLAGS -fcommon for all host tools
           if ! grep -q 'HOSTCFLAGS.*-fcommon' Makefile; then
-            sed -i '/^HOSTCFLAGS/ s|$| -fcommon|' Makefile || true
-            # also export for recursive makes
             echo 'export HOSTCFLAGS += -fcommon' >> Makefile
           fi
-          grep -n 'yylloc' scripts/dtc/dtc-lexer.l scripts/dtc/dtc-lexer.lex.c scripts/dtc/dtc-parser.tab.c 2>/dev/null | head -20 || true
-          echo "[+] dtc yylloc / -fcommon host fix applied"
+          echo "[+] host/kernel flag fixes"
 
       - name: Configure kernel
         run: |
@@ -121,67 +101,62 @@ jobs:
 
           if [ -f "arch/arm64/configs/$BOARD_DEFCONFIG" ]; then
             scripts/kconfig/merge_config.sh -m -O out out/.config "arch/arm64/configs/$BOARD_DEFCONFIG" 2>/dev/null || \
-            cat "arch/arm64/configs/$BOARD_DEFCONFIG" >> out/.config
+              cat "arch/arm64/configs/$BOARD_DEFCONFIG" >> out/.config
           fi
 
-          # Align to stock timing/flavor (WiFi/BT CONSYS is HZ-sensitive)
+          # Stock-align (WiFi/BT CONSYS HZ-sensitive on this device)
           scripts/config --file out/.config \
-            --enable HZ_300 \
-            --disable HZ_250 \
-            --disable HZ_100 \
-            --disable HZ_1000 \
-            --set-val HZ 300 \
+            --enable HZ_300 --disable HZ_250 --disable HZ_100 --disable HZ_1000 --set-val HZ 300 \
             --enable FINAL_RELEASE \
-            --disable SCHED_DEBUG \
-            --disable DYNAMIC_DEBUG \
-            --disable CGROUP_DEBUG \
-            --disable CMA_DEBUG \
-            --disable SND_DEBUG \
-            --disable SND_DEBUG_VERBOSE \
-            --disable SND_PCM_XRUN_DEBUG \
+            --disable SCHED_DEBUG --disable DYNAMIC_DEBUG --disable CGROUP_DEBUG --disable CMA_DEBUG \
+            --disable SND_DEBUG --disable SND_DEBUG_VERBOSE --disable SND_PCM_XRUN_DEBUG \
             --disable MMC_BLOCK_IO_LOG \
-            --disable MTK_LOCK_DEBUG \
-            --disable MTK_CPU_HOTPLUG_DEBUG_0 \
-            --disable MTK_CPU_HOTPLUG_DEBUG_2 \
-            --disable MTK_CPU_HOTPLUG_DEBUG_3 \
+            --disable MTK_LOCK_DEBUG --disable MTK_CPU_HOTPLUG_DEBUG_0 \
+            --disable MTK_CPU_HOTPLUG_DEBUG_2 --disable MTK_CPU_HOTPLUG_DEBUG_3 \
             --disable SECURITY_SELINUX_DEVELOP \
             --set-val LOG_BUF_SHIFT 19
 
-          # ReSukiSU: force manual hook path (4.4 cannot use GKI tracepoints)
+          # ReSukiSU core
+          # KALLSYMS_ALL=y skips static_export_check entirely (official tip)
+          # AUTO_* hooks stay default y (LSM path for setuid/initrc/input on 4.4)
           scripts/config --file out/.config \
             --enable KSU \
             --enable KSU_MANUAL_HOOK \
-            --disable KSU_DEBUG \
             --disable KSU_TRACEPOINT_HOOK \
             --disable KSU_SUSFS \
+            --disable KSU_DEBUG \
             --disable KPROBES \
             --enable KALLSYMS \
-            --disable KALLSYMS_ALL \
-            --enable NAMESPACES \
-            --enable NET_NS \
-            --enable PID_NS \
-            --enable USER_NS \
-            --enable UTS_NS \
+            --enable KALLSYMS_ALL \
+            --enable KSU_MULTI_MANAGER_SUPPORT \
+            --enable KSU_MANUAL_HOOK_AUTO_SETUID_HOOK \
+            --enable KSU_MANUAL_HOOK_AUTO_INITRC_HOOK \
+            --enable KSU_MANUAL_HOOK_AUTO_INPUT_HOOK \
+            --enable NAMESPACES --enable NET_NS --enable PID_NS --enable USER_NS --enable UTS_NS \
             --disable HW_ROOT_SCAN \
-            --enable OVERLAY_FS \
-            --enable KSU_MULTI_MANAGER_SUPPORT || true
-
-          # optional configs may not exist on older Kconfig (v4.x); ignore failures
-          scripts/config --file out/.config --disable KPM 2>/dev/null || true
-          scripts/config --file out/.config --enable KSU_MANUAL_SU 2>/dev/null || true
+            --enable OVERLAY_FS || true
 
           make O=out ARCH=arm64 python=python2 olddefconfig
 
-          # Force HZ again after olddefconfig
-          scripts/config --file out/.config --enable HZ_300 --disable HZ_250 --set-val HZ 300
-          # Force manual hook again (choice can flip)
-          scripts/config --file out/.config --enable KSU --enable KSU_MANUAL_HOOK --disable KSU_TRACEPOINT_HOOK 2>/dev/null || true
+          # force again after olddefconfig (choice / selects can flip)
+          scripts/config --file out/.config \
+            --enable HZ_300 --disable HZ_250 --set-val HZ 300 \
+            --enable KSU --enable KSU_MANUAL_HOOK --disable KSU_TRACEPOINT_HOOK \
+            --enable KALLSYMS --enable KALLSYMS_ALL || true
           make O=out ARCH=arm64 python=python2 olddefconfig
 
           echo "=== Config check ==="
-          for cfg in KSU KSU_MANUAL_HOOK KSU_TRACEPOINT_HOOK KPROBES KALLSYMS_ALL NAMESPACES HW_ROOT_SCAN OVERLAY_FS HZ HZ_300 HZ_250 FINAL_RELEASE MTK_COMBO_WIFI MTK_COMBO_BT KSU_MULTI_MANAGER_SUPPORT; do
+          for cfg in KSU KSU_MANUAL_HOOK KSU_TRACEPOINT_HOOK KSU_MANUAL_HOOK_AUTO_SETUID_HOOK \
+                     KSU_MANUAL_HOOK_AUTO_INITRC_HOOK KSU_MANUAL_HOOK_AUTO_INPUT_HOOK \
+                     KPROBES KALLSYMS KALLSYMS_ALL NAMESPACES HW_ROOT_SCAN OVERLAY_FS \
+                     HZ HZ_300 FINAL_RELEASE KSU_MULTI_MANAGER_SUPPORT; do
             grep "CONFIG_${cfg}" out/.config || echo "CONFIG_${cfg} not found"
           done
+
+          # hard fail if critical off
+          grep -q '^CONFIG_KSU=y' out/.config
+          grep -q '^CONFIG_KSU_MANUAL_HOOK=y' out/.config
+          grep -q '^CONFIG_KALLSYMS_ALL=y' out/.config
 
       - name: Force python2 for MTK host scripts
         run: |
@@ -194,39 +169,31 @@ jobs:
           export CROSS_COMPILE="$GITHUB_WORKSPACE/gcc49/bin/aarch64-linux-android-"
           export PATH="$GITHUB_WORKSPACE/bin:$GITHUB_WORKSPACE/gcc49/bin:$PATH"
           export HOSTCFLAGS="-fcommon"
-          # re-apply yylloc fix in case SHIPPED regenerated earlier somehow
           for f in scripts/dtc/dtc-lexer.l scripts/dtc/dtc-lexer.lex.c; do
             [ -f "$f" ] && sed -i 's/^YYLTYPE yylloc;/extern YYLTYPE yylloc;/' "$f" || true
           done
+          # keep build going past unrelated driver warnings; fail on real errors
           make O=out ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" HOSTCFLAGS="-fcommon" python=python2 -j"$(nproc)" Image
-          if [ -f out/arch/arm64/boot/Image ]; then
-            echo "[+] Build SUCCESS: Image"
-            ls -la out/arch/arm64/boot/Image
-          else
-            echo "[-] Build FAILED: no kernel image found"
-            find out/arch/arm64/boot/ -type f 2>/dev/null || true
-            exit 1
-          fi
+          test -f out/arch/arm64/boot/Image
+          ls -la out/arch/arm64/boot/Image
 
       - name: Package kernel image
         run: |
           mkdir -p output
           cd kernel/out/arch/arm64/boot
           for img in Image.gz-dtb Image.gz Image; do
-            if [ -f "$img" ]; then
-              cp "$img" "$GITHUB_WORKSPACE/output/"
-              echo "Packaged: $img ($(stat -c%s "$img") bytes)"
-            fi
+            [ -f "$img" ] && cp "$img" "$GITHUB_WORKSPACE/output/" && echo "Packaged $img"
           done
           find . -name '*.dtb' -exec cp {} "$GITHUB_WORKSPACE/output/" \; 2>/dev/null || true
-          # stamp
-          echo "ReSukiSU_REF=$RESUKISU_REF" > "$GITHUB_WORKSPACE/output/build-info.txt"
-          (cd "$GITHUB_WORKSPACE/kernel/KernelSU" && git rev-parse HEAD && git describe --tags --always) >> "$GITHUB_WORKSPACE/output/build-info.txt" || true
+          {
+            echo "RESUKISU_REF=$RESUKISU_REF"
+            (cd "$GITHUB_WORKSPACE/kernel/KernelSU" && git rev-parse HEAD && git describe --tags --always)
+          } > "$GITHUB_WORKSPACE/output/build-info.txt"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DRA-ReSukiSU-kernel-${{ env.RESUKISU_REF }}
+          name: DRA-ReSukiSU-kernel
           path: output/
 
       - name: Create Release
@@ -236,12 +203,9 @@ jobs:
           tag_name: resukisu-${{ github.run_number }}
           name: "DRA-AL00 ReSukiSU Build #${{ github.run_number }}"
           body: |
-            DRA-AL00 (MT6739) kernel 4.4.95 with ReSukiSU
-            - Source: ReSukiSU/ReSukiSU @ ${{ env.RESUKISU_REF }}
-            - Manual hook mode (no kprobes / no GKI tracepoints)
-            - stock-align: HZ=300 FINAL_RELEASE=y
-            - MULTI_MANAGER_SUPPORT if available
-            - HW_ROOT_SCAN disabled, NAMESPACES + OVERLAY_FS enabled
-
-            Use your ReSukiSU Manager APK with this kernel.
+            DRA-AL00 (MT6739) 4.4.95 + ReSukiSU @ ${{ env.RESUKISU_REF }}
+            - MANUAL_HOOK + AUTO setuid/initrc/input
+            - KALLSYMS_ALL=y + static exports
+            - HZ=300 FINAL_RELEASE stock-align
+            - multi-manager support
           files: output/*
