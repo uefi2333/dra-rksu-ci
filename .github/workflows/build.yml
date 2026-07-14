@@ -128,7 +128,7 @@ jobs:
               cat "arch/arm64/configs/$BOARD_DEFCONFIG" >> out/.config
           fi
 
-          # Stock-align (WiFi/BT CONSYS HZ-sensitive on this device)
+          # Stock-align from extracted stock ikconfig (WiFi/BT/call/battery)
           scripts/config --file out/.config \
             --enable HZ_300 --disable HZ_250 --disable HZ_100 --disable HZ_1000 --set-val HZ 300 \
             --enable FINAL_RELEASE \
@@ -138,7 +138,10 @@ jobs:
             --disable MTK_LOCK_DEBUG --disable MTK_CPU_HOTPLUG_DEBUG_0 \
             --disable MTK_CPU_HOTPLUG_DEBUG_2 --disable MTK_CPU_HOTPLUG_DEBUG_3 \
             --disable SECURITY_SELINUX_DEVELOP \
-            --set-val LOG_BUF_SHIFT 19
+            --set-val LOG_BUF_SHIFT 19 \
+            --enable MMC_FFU --enable MTK_BLOCK_TAG \
+            --enable HUAWEI_VIRT_TO_PHYS --enable HUAWEI_TS_KIT_TEST \
+            --disable SW_BRAND_HONOR --disable SW_BRAND_HUAWEI
 
           # ReSukiSU core
           # KALLSYMS_ALL=y skips static_export_check entirely (official tip)
@@ -165,15 +168,24 @@ jobs:
           # force again after olddefconfig (choice / selects can flip)
           scripts/config --file out/.config \
             --enable HZ_300 --disable HZ_250 --set-val HZ 300 \
+            --enable FINAL_RELEASE --disable CMA_DEBUG --disable DYNAMIC_DEBUG \
+            --enable MMC_FFU --enable MTK_BLOCK_TAG \
+            --enable HUAWEI_VIRT_TO_PHYS --enable HUAWEI_TS_KIT_TEST \
             --enable KSU --enable KSU_MANUAL_HOOK --disable KSU_TRACEPOINT_HOOK \
             --enable KALLSYMS --enable KALLSYMS_ALL || true
+          make O=out ARCH=arm64 python=python2 olddefconfig
+          # third pass: debug options reappear via selects
+          scripts/config --file out/.config \
+            --disable CMA_DEBUG --disable DYNAMIC_DEBUG --disable SCHED_DEBUG \
+            --disable SND_DEBUG --disable SND_DEBUG_VERBOSE --disable MMC_BLOCK_IO_LOG \
+            --enable HZ_300 --disable HZ_250 --set-val HZ 300 --enable FINAL_RELEASE || true
           make O=out ARCH=arm64 python=python2 olddefconfig
 
           echo "=== Config check ==="
           for cfg in KSU KSU_MANUAL_HOOK KSU_TRACEPOINT_HOOK KSU_MANUAL_HOOK_AUTO_SETUID_HOOK \
                      KSU_MANUAL_HOOK_AUTO_INITRC_HOOK KSU_MANUAL_HOOK_AUTO_INPUT_HOOK \
                      KPROBES KALLSYMS KALLSYMS_ALL NAMESPACES HW_ROOT_SCAN OVERLAY_FS \
-                     HZ HZ_300 FINAL_RELEASE KSU_MULTI_MANAGER_SUPPORT; do
+                     HZ HZ_300 FINAL_RELEASE CMA_DEBUG MMC_FFU MTK_BLOCK_TAG HUAWEI_VIRT_TO_PHYS KSU_MULTI_MANAGER_SUPPORT; do
             grep "CONFIG_${cfg}" out/.config || echo "CONFIG_${cfg} not found"
           done
 
